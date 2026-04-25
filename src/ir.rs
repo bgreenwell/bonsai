@@ -76,7 +76,7 @@ pub enum AggregationKind {
     Average,
 }
 
-/// Post-transform applied to the aggregated scalar.
+/// Post-transform applied to the aggregated scalar (or vector for multiclass).
 #[derive(Debug, Clone, PartialEq)]
 pub enum PostTransform {
     /// `output = raw`
@@ -85,6 +85,11 @@ pub enum PostTransform {
     Logit,
     /// `output = exp(raw)`
     Log,
+    /// Multiclass softmax over K raw scores.
+    ///
+    /// Trees are assigned to classes round-robin: tree[i] → class (i % n_classes).
+    /// Output is a Vec<f32> of length `n_classes`.
+    Softmax { n_classes: usize },
 }
 
 /// The complete ensemble model.

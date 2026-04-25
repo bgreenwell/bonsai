@@ -38,10 +38,13 @@ fn print_metadata(forest: &Forest) {
     println!("Base score:         {:.6}", forest.base_score);
 
     // Determine task type from post-transform
-    let task = match forest.post_transform {
-        PostTransform::Logit => "Binary Classification",
-        PostTransform::Identity => "Regression",
-        PostTransform::Log => "Regression (log-transformed)",
+    let task = match &forest.post_transform {
+        PostTransform::Logit => "Binary Classification".to_string(),
+        PostTransform::Identity => "Regression".to_string(),
+        PostTransform::Log => "Regression (log-transformed)".to_string(),
+        PostTransform::Softmax { n_classes } => {
+            format!("Multi-class Classification ({} classes)", n_classes)
+        }
     };
     println!("Inferred task:      {}", task);
 }
