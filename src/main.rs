@@ -9,6 +9,7 @@ pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use frontends::Frontend;
 use std::path::PathBuf;
@@ -92,6 +93,30 @@ fn inspect_command(input: PathBuf, show_trees: bool, num_trees: usize) -> anyhow
     Ok(())
 }
 
+/// Peek at a .json file to determine whether it is XGBoost or LightGBM, then parse it.
+fn detect_and_parse_json(input: &PathBuf) -> anyhow::Result<ir::Forest> {
+    let content = std::fs::read_to_string(input)
+        .with_context(|| format!("Failed to read {:?}", input))?;
+    let probe: serde_json::Value =
+        serde_json::from_str(&content).context("Failed to parse JSON — is this a valid model file?")?;
+
+    if probe.get("learner").is_some() {
+        println!("   > Detected XGBoost JSON");
+        frontends::xgboost::XgboostFrontend::new().parse(input)
+    } else if probe.get("tree_info").is_some() {
+        println!("   > Detected LightGBM JSON");
+        // LightGBM frontend registered in a follow-on branch
+        anyhow::bail!("LightGBM JSON support is not yet compiled in this build.")
+    } else {
+        anyhow::bail!(
+            "Unrecognized JSON model format in '{:?}'. \
+             Expected XGBoost JSON (top-level 'learner' key) \
+             or LightGBM JSON (top-level 'tree_info' key).",
+            input
+        )
+    }
+}
+
 /// Parse a model file into IR based on file extension
 fn parse_model(input: &PathBuf) -> anyhow::Result<ir::Forest> {
     let ext = input
@@ -108,9 +133,10 @@ fn parse_model(input: &PathBuf) -> anyhow::Result<ir::Forest> {
             let fe = frontends::onnx::OnnxFrontend::new();
             fe.parse(input)
         }
+        "json" => detect_and_parse_json(input),
         _ => {
             anyhow::bail!(
-                "Unsupported file extension '.{}'. Expected .zip (MOJO), .onnx, or .pb (ONNX).",
+                "Unsupported file extension '.{}'. Expected .zip (MOJO), .onnx/.pb (ONNX), or .json (XGBoost/LightGBM).",
                 ext
             );
         }

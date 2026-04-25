@@ -10,3 +10,4 @@ pub trait Frontend {
 
 pub mod mojo;
 pub mod onnx;
+pub mod xgboost;
