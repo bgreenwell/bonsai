@@ -347,6 +347,22 @@ fn test_xgboost_classification_numeric() {
 }
 
 // ---------------------------------------------------------------------------
+// LightGBM JSON tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_lightgbm_regression_numeric() {
+    run_test_case("lightgbm/regression_numeric", false);
+}
+
+#[test]
+#[ignore]
+fn test_lightgbm_classification_numeric() {
+    run_test_case("lightgbm/classification_numeric", false);
+}
+
+// ---------------------------------------------------------------------------
 // Non-ignored structural smoke-test (runs in normal cargo test)
 // ---------------------------------------------------------------------------
 

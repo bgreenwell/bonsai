@@ -8,6 +8,7 @@ pub trait Frontend {
     fn parse(&self, path: &Path) -> Result<Forest>;
 }
 
+pub mod lightgbm;
 pub mod mojo;
 pub mod onnx;
 pub mod xgboost;
