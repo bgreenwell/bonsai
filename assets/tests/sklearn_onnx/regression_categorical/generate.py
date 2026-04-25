@@ -99,7 +99,12 @@ def main():
             "format": "sklearn_onnx", "task": "regression",
             "n_trees": N_TREES, "n_numeric_features": N_NUMERIC,
             "n_categorical_features": 3, "seed": SEED,
-            "categorical_encoding": "label_encoded"
+            "categorical_encoding": "label_encoded",
+            "categorical_features": [
+                {"name": "cat_a", "levels": sorted(le_a.classes_.tolist())},
+                {"name": "cat_b", "levels": sorted(le_b.classes_.tolist())},
+                {"name": "cat_c", "levels": sorted(le_c.classes_.tolist())},
+            ],
         }, f, indent=2)
 
     print("\n✓ SUCCESS!")
