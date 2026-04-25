@@ -1,0 +1,48 @@
+[package]
+name = "bonsai"
+version = "0.1.0"
+edition = "2021"
+default-run = "bonsai"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# ONNX protobuf runtime
+prost = "0.12"
+prost-types = "0.12"
+
+# Code generation
+quote = "1"
+proc-macro2 = "1"
+
+# MOJO archive + binary parsing
+zip = "0.6"
+byteorder = "1"
+
+# Scorer — optional, heavy
+polars = { version = "0.37", features = ["lazy", "parquet", "csv"], optional = true }
+rayon  = { version = "1",    optional = true }
+
+[features]
+default = []
+scorer  = ["polars", "rayon"]
+
+[build-dependencies]
+prost-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "bonsai"
+path = "src/main.rs"
+
+[[bin]]
+name = "polars_score"
+path = "src/bin/polars_score.rs"
+required-features = ["scorer"]

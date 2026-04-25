@@ -1,0 +1,32 @@
+// Test harness for bonsai-generated models
+// This file is a template - {MODEL_RS_PATH} will be replaced with actual path
+
+#[path = "{MODEL_RS_PATH}"]
+mod model;
+
+use std::io::{self, BufRead};
+
+fn main() {
+    let model = model::Model;
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let line = line.unwrap();
+        let values: Vec<f32> = line
+            .split(',')
+            .map(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("nan") {
+                    f32::NAN
+                } else {
+                    trimmed.parse().unwrap_or(f32::NAN)
+                }
+            })
+            .collect();
+
+        if values.len() >= {MIN_FEATURES} {
+            let prediction = model.predict(&values[..{MIN_FEATURES}]);
+            println!("{{:.10}}", prediction);
+        }
+    }
+}
