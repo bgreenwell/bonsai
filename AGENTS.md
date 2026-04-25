@@ -25,8 +25,8 @@ cargo test
 # Run a specific test
 cargo test test_name
 
-# Run integration tests (requires external setup - see assets/examples/)
-cargo test h2o3_integration -- --ignored
+# Run integration tests (requires Python environment and model generation)
+cargo test --test integration_test -- --ignored
 
 # Build the optional polars_score batch scoring binary
 cargo build --release --features scorer --bin polars_score
@@ -150,27 +150,26 @@ Generates standalone Rust code from IR:
 
 ### Unit Tests
 - Located in same file as code under test (`#[cfg(test)] mod tests`)
-- Test IR construction, node compilation, helper functions
+- **`src/ir.rs`**: ~19 tests covering Forest/Tree/Node construction, categorical semantics, weight handling
+- **`src/parsers/tree_parser.rs`**: ~18 tests covering binary parsing, NaVsRest nodes, categorical bitsets
+- **`src/backends/rust.rs`**: no unit tests yet (planned)
+- Run with: `cargo test`
 
 ### Integration Tests
-- Located in `assets/examples/h2o3/` and `assets/examples/regression/`
-- Each example has:
-  - Python training script (`train_and_export.py`)
-  - Ground truth test data with predictions (`generated/test_data.csv`)
-  - Validation scripts comparing bonsai output to H2O predictions
-  - Generated outputs organized in `generated/` subdirectory
+- Located in `tests/integration_test.rs` and `assets/tests/`
+- Cover 8 scenarios across H2O MOJO and sklearn ONNX, numeric and categorical features
+- All are `#[ignore]` — require Python environment and pre-generated model assets
+- Model generation scripts: `assets/tests/<format>/<scenario>/generate.py`
+- **Note:** Prediction validation is currently a stub — structure checks pass but numeric accuracy is not yet verified end-to-end
 
-### Running Examples
+### Running Integration Tests
 ```bash
-# H2O-3 binary classification example
-cd assets/examples/h2o3
-python train_and_export.py  # Trains model, exports MOJO + ONNX
-python validate.py          # Compares predictions
+# Generate model assets first (requires Python + h2o or sklearn)
+cd assets/tests/h2o_mojo/classification_numeric
+python generate.py
 
-# Regression example (includes categorical features)
-cd assets/examples/regression
-python train_and_export.py
-python validate.py
+# Run integration tests
+cargo test --test integration_test -- --ignored
 ```
 
 ## Code Generation with quote! and proc-macro2
@@ -228,7 +227,7 @@ let code = quote! {
    - Instantiate frontend and call `parse()`
 
 3. **Add integration test:**
-   - Create `assets/examples/newformat/` directory
+   - Create `assets/tests/newformat/` directory
    - Include training script, test data, validation scripts
    - Organize outputs in `generated/` subdirectory
 
