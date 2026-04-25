@@ -136,24 +136,43 @@ impl super::Frontend for OnnxFrontend {
                 .insert(target_node_ids[i], target_weights[i]);
         }
 
-        // 7. Populate leaf values — classifier path (Bug 2 fix)
+        // 7. Populate leaf values — classifier path
         //
         // class_ids, class_tree_ids, class_node_ids, class_weights are parallel arrays.
-        // Each entry is one (tree, node, class) triple. We filter to the target class
-        // instead of using fragile stride arithmetic.
+        //
+        // Binary classification (n_classes == 2):
+        //   Take class 1 leaf weights (the positive-class score per tree).
+        //
+        // Multiclass (n_classes > 2):
+        //   Trees are round-robin assigned to classes: tree T → class (T % n_classes).
+        //   For each leaf entry, take the weight only when class_id == (tree_id % n_classes).
         if !class_ids.is_empty() {
             let n_classes = class_ids.iter().max().map(|&m| (m + 1) as usize).unwrap_or(1);
-            // Binary: take class 1 (positive). Single-output fallback: class 0.
-            let target_class: i64 = if n_classes >= 2 { 1 } else { 0 };
 
-            for i in 0..class_ids.len() {
-                if class_ids[i] != target_class {
-                    continue;
+            if n_classes <= 2 {
+                // Binary: take class 1 (positive). Single-output fallback: class 0.
+                let target_class: i64 = if n_classes == 2 { 1 } else { 0 };
+                for i in 0..class_ids.len() {
+                    if class_ids[i] != target_class {
+                        continue;
+                    }
+                    let tid = class_tree_ids[i];
+                    let nid = class_node_ids[i];
+                    let builder = trees_map.entry(tid).or_default();
+                    builder.leaves.insert(nid, class_weights[i]);
                 }
-                let tid = class_tree_ids[i];
-                let nid = class_node_ids[i];
-                let builder = trees_map.entry(tid).or_default();
-                builder.leaves.insert(nid, class_weights[i]);
+            } else {
+                // Multiclass: tree T owns class (T % n_classes).
+                for i in 0..class_ids.len() {
+                    let tid = class_tree_ids[i];
+                    let expected_class = tid % n_classes as i64;
+                    if class_ids[i] != expected_class {
+                        continue;
+                    }
+                    let nid = class_node_ids[i];
+                    let builder = trees_map.entry(tid).or_default();
+                    builder.leaves.insert(nid, class_weights[i]);
+                }
             }
         }
 
@@ -187,8 +206,18 @@ impl super::Frontend for OnnxFrontend {
             .and_then(|s| std::str::from_utf8(s).ok())
             .unwrap_or("NONE");
 
+        // For multiclass, determine n_classes from the class_ids attribute (if present).
+        let n_classes_from_attr = if !class_ids.is_empty() {
+            class_ids.iter().max().map(|&m| (m + 1) as usize).unwrap_or(1)
+        } else {
+            1
+        };
+
         let post_transform = match onnx_post {
             "LOGISTIC" => PostTransform::Logit,
+            "SOFTMAX" | "SOFTMAX_ZERO" if n_classes_from_attr > 2 => {
+                PostTransform::Softmax { n_classes: n_classes_from_attr }
+            }
             _ => PostTransform::Identity,
         };
 
