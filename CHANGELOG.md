@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **XGBoost JSON frontend** (`src/frontends/xgboost.rs`)
+  - Parses XGBoost native JSON models saved via `model.save_model("*.json")`
+  - Supports `reg:squarederror` (Identity), `binary:logistic` / `reg:logistic` (Logit), and `multi:softmax` / `multi:softprob` (Softmax) objectives
+  - Handles NaN routing via `default_left` parallel arrays
+  - Applies logit transform to `base_score` for pre-1.6 models that stored it in probability space
+  - Auto-detected from `.json` extension by checking for top-level `"learner"` key
+  - 5 unit tests with inline JSON fixtures
+  - Integration test stubs: `test_xgboost_regression_numeric`, `test_xgboost_classification_numeric` (run with `--include-ignored` after `generate.py`)
+- **LightGBM JSON frontend** (`src/frontends/lightgbm.rs`)
+  - Parses LightGBM models exported via `Booster.dump_model()` (JSON format)
+  - Supports `regression` (Identity), `binary` (Logit), and `multiclass` / `softmax` (Softmax) objectives
+  - Handles the recursive `tree_structure` format; accepts threshold as JSON string or number
+  - NaN routing via `default_left` boolean per node
+  - Auto-detected from `.json` extension by checking for top-level `"tree_info"` key
+  - 5 unit tests with inline JSON fixtures
+  - Integration test stubs: `test_lightgbm_regression_numeric`, `test_lightgbm_classification_numeric`
 - **Multiclass classification (softmax)** — new `PostTransform::Softmax { n_classes }` IR variant
   - Backend generates `predict_proba(&self, features: &[f32]) -> Vec<f32>` for multiclass models
   - Trees are round-robin assigned to classes: tree `i` → class `i % n_classes`
