@@ -8,15 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- H2O-3 MOJO parser for GBM models (binary classification and regression)
-- ONNX TreeEnsemble parser for generic tree models
-- Rust code generator backend with zero runtime dependencies
-- Support for numeric and categorical splits
-- Missing value handling (NaLeft, NaRight, NaVsRest)
-- Binary classification with logit post-transform
-- Regression with identity and log post-transforms
-- H2O-3 example with validation against ground truth
-- Batch scoring binary using Polars + Rayon
+- **Multiclass classification (softmax)** — new `PostTransform::Softmax { n_classes }` IR variant
+  - Backend generates `predict_proba(&self, features: &[f32]) -> Vec<f32>` for multiclass models
+  - Trees are round-robin assigned to classes: tree `i` → class `i % n_classes`
+  - Numerically-stable softmax (subtract max before exp)
+  - ONNX frontend now detects `post_transform = "SOFTMAX"` / `"SOFTMAX_ZERO"` with `n_classes > 2` and extracts per-class leaf weights correctly
+  - 5 new unit tests in `src/backends/rust.rs`
+- **GitHub Actions CI** (`.github/workflows/ci.yml`)
+  - `test` job: `cargo build --release` + `cargo test` (unit tests)
+  - `lint` job: `cargo fmt --check` + `cargo clippy -D warnings`
+  - Runs on push/PR to `main`; integration tests remain `#[ignore]`
+
+### Changed
+- **Integration test validation is now real** — `tests/integration_test.rs` previously skipped numeric comparison entirely (placeholder stub); it now compiles the generated `model.rs` with `rustc` at test time, pipes feature rows through stdin, and asserts predictions match ground truth within 1e-5
+  - Categorical string values in `test_data.csv` are converted to integer indices using level mappings from `metadata.json`
+  - Uses `env!("CARGO_BIN_EXE_bonsai")` instead of `cargo run` for speed
+  - sklearn ONNX `generate.py` scripts for categorical tests now write `categorical_features` levels to `metadata.json`
+  - Removed stale `tests/h2o3_integration.rs` (referenced old `assets/examples/` paths)
+- Fixed `assets/tests/common/test_harness.rs.template`: `{{:.10}}` → `{:.10}` (Python-style escaping was producing invalid Rust format string)
+- Added `serde_json` to dev-dependencies for metadata parsing in integration tests
+
+### Documentation
+- `AGENTS.md` updated to reflect actual test state: unit test counts per file (`ir.rs` ~19, `tree_parser.rs` ~18, `rust.rs` 5), correct integration test paths (`assets/tests/` not `assets/examples/`), and a note that prediction validation was a stub (now fixed)
 
 ### Fixed
 - **[CRITICAL]** Categorical split branch direction in H2O MOJO models (2025-02-26)
