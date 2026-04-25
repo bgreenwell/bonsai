@@ -26,7 +26,7 @@ fn main() {
 
         if values.len() >= {MIN_FEATURES} {
             let prediction = model.predict(&values[..{MIN_FEATURES}]);
-            println!("{{:.10}}", prediction);
+            println!("{:.10}", prediction);
         }
     }
 }
