@@ -331,6 +331,22 @@ fn test_sklearn_onnx_regression_categorical() {
 }
 
 // ---------------------------------------------------------------------------
+// XGBoost JSON tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_xgboost_regression_numeric() {
+    run_test_case("xgboost/regression_numeric", false);
+}
+
+#[test]
+#[ignore]
+fn test_xgboost_classification_numeric() {
+    run_test_case("xgboost/classification_numeric", false);
+}
+
+// ---------------------------------------------------------------------------
 // Non-ignored structural smoke-test (runs in normal cargo test)
 // ---------------------------------------------------------------------------
 

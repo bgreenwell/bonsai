@@ -1,0 +1,4 @@
+xgboost>=1.7
+numpy
+pandas
+scikit-learn
