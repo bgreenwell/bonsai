@@ -1,0 +1,4 @@
+lightgbm>=3.3
+numpy
+pandas
+scikit-learn

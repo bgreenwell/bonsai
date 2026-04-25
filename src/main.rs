@@ -105,8 +105,7 @@ fn detect_and_parse_json(input: &PathBuf) -> anyhow::Result<ir::Forest> {
         frontends::xgboost::XgboostFrontend::new().parse(input)
     } else if probe.get("tree_info").is_some() {
         println!("   > Detected LightGBM JSON");
-        // LightGBM frontend registered in a follow-on branch
-        anyhow::bail!("LightGBM JSON support is not yet compiled in this build.")
+        frontends::lightgbm::LightgbmFrontend::new().parse(input)
     } else {
         anyhow::bail!(
             "Unrecognized JSON model format in '{:?}'. \
