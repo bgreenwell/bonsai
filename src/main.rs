@@ -5,6 +5,7 @@ mod ir;
 mod parsers;
 
 /// Generated ONNX protobuf bindings (produced by prost-build from src/proto/onnx.proto).
+#[allow(clippy::doc_overindented_list_items)]
 pub mod onnx {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
@@ -29,7 +30,7 @@ struct Cli {
 enum Commands {
     /// Transpile a model to Rust source code
     Transpile {
-        /// Path to the input model file (.zip for H2O MOJO, .onnx or .pb for ONNX)
+        /// Path to the input model file (.zip for H2O MOJO, .onnx or .pb for ONNX, .json for XGBoost/LightGBM)
         #[arg(short, long, value_name = "FILE")]
         input: PathBuf,
 
@@ -40,7 +41,7 @@ enum Commands {
 
     /// Inspect a model's structure and metadata
     Inspect {
-        /// Path to the input model file (.zip for H2O MOJO, .onnx or .pb for ONNX)
+        /// Path to the input model file (.zip for H2O MOJO, .onnx or .pb for ONNX, .json for XGBoost/LightGBM)
         #[arg(value_name = "FILE")]
         input: PathBuf,
 
@@ -58,12 +59,12 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Transpile { input, output } => {
-            transpile_command(input, output)
-        }
-        Commands::Inspect { input, trees, num_trees } => {
-            inspect_command(input, trees, num_trees)
-        }
+        Commands::Transpile { input, output } => transpile_command(input, output),
+        Commands::Inspect {
+            input,
+            trees,
+            num_trees,
+        } => inspect_command(input, trees, num_trees),
     }
 }
 
@@ -95,10 +96,10 @@ fn inspect_command(input: PathBuf, show_trees: bool, num_trees: usize) -> anyhow
 
 /// Peek at a .json file to determine whether it is XGBoost or LightGBM, then parse it.
 fn detect_and_parse_json(input: &PathBuf) -> anyhow::Result<ir::Forest> {
-    let content = std::fs::read_to_string(input)
-        .with_context(|| format!("Failed to read {:?}", input))?;
-    let probe: serde_json::Value =
-        serde_json::from_str(&content).context("Failed to parse JSON — is this a valid model file?")?;
+    let content =
+        std::fs::read_to_string(input).with_context(|| format!("Failed to read {:?}", input))?;
+    let probe: serde_json::Value = serde_json::from_str(&content)
+        .context("Failed to parse JSON — is this a valid model file?")?;
 
     if probe.get("learner").is_some() {
         println!("   > Detected XGBoost JSON");
@@ -118,10 +119,7 @@ fn detect_and_parse_json(input: &PathBuf) -> anyhow::Result<ir::Forest> {
 
 /// Parse a model file into IR based on file extension
 fn parse_model(input: &PathBuf) -> anyhow::Result<ir::Forest> {
-    let ext = input
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "zip" => {

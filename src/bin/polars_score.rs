@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     // --- Load data ---
     let input_str = cli.input.to_string_lossy().to_string();
 
-    let mut df = if cli.input.extension().map_or(false, |ext| ext == "parquet")
+    let mut df = if cli.input.extension().is_some_and(|ext| ext == "parquet")
         || cli.input.is_dir()
     {
         LazyFrame::scan_parquet(&input_str, ScanArgsParquet::default())?
@@ -124,7 +124,7 @@ fn main() -> anyhow::Result<()> {
     df.with_column(score_series)?;
 
     let mut output_file = std::fs::File::create(&cli.output)?;
-    if cli.output.extension().map_or(false, |ext| ext == "parquet") {
+    if cli.output.extension().is_some_and(|ext| ext == "parquet") {
         ParquetWriter::new(&mut output_file).finish(&mut df)?;
     } else {
         CsvWriter::new(&mut output_file).finish(&mut df)?;

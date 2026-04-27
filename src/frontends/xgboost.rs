@@ -18,8 +18,7 @@ impl super::Frontend for XgboostFrontend {
     fn parse(&self, path: &Path) -> Result<Forest> {
         let content =
             fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?;
-        let root: Value =
-            serde_json::from_str(&content).context("Failed to parse XGBoost JSON")?;
+        let root: Value = serde_json::from_str(&content).context("Failed to parse XGBoost JSON")?;
 
         let learner = root
             .get("learner")
@@ -29,12 +28,9 @@ impl super::Frontend for XgboostFrontend {
         let model_param = &learner["learner_model_param"];
 
         let base_score_str = model_param["base_score"].as_str().unwrap_or("0.5");
-        // XGBoost 3.x wraps base_score in brackets, e.g. "[0E0]" → "0E0"
-        let base_score_clean = base_score_str.trim_matches(|c| c == '[' || c == ']');
-        let base_score_raw: f64 = base_score_clean
-            .parse()
-            .with_context(|| format!("Invalid base_score: '{}'", base_score_str))?;
-
+        // XGBoost 3.x wraps base_score in brackets. For binary/regression: "[5E-1]" → scalar.
+        // For multiclass: "[v0,v1,v2]" → one value per class.
+        let base_score_inner = base_score_str.trim_matches(|c| c == '[' || c == ']');
 
         let num_class: usize = model_param["num_class"]
             .as_str()
@@ -49,15 +45,31 @@ impl super::Frontend for XgboostFrontend {
 
         let post_transform = post_transform_for_objective(objective_name, num_class);
 
-        // XGBoost stores base_score in output (probability) space for logistic objectives.
-        // If it looks like a probability (0 < x < 1), apply logit to convert to margin space.
-        let base_score = if matches!(post_transform, PostTransform::Logit)
-            && base_score_raw > 0.0
-            && base_score_raw < 1.0
-        {
-            (base_score_raw / (1.0 - base_score_raw)).ln()
+        // Parse base_score: scalar for binary/regression, vector for multiclass.
+        let (base_score, base_scores) = if base_score_inner.contains(',') {
+            // Multiclass vector: "[v0,v1,v2]" → Vec<f64>
+            let scores: Vec<f64> = base_score_inner
+                .split(',')
+                .map(|s| s.trim().parse::<f64>())
+                .collect::<std::result::Result<_, _>>()
+                .with_context(|| {
+                    format!("Invalid multiclass base_score vector: '{}'", base_score_str)
+                })?;
+            (0.0f64, scores)
         } else {
-            base_score_raw
+            // Scalar: XGBoost may store in probability space for logistic objectives.
+            let raw: f64 = base_score_inner
+                .parse()
+                .with_context(|| format!("Invalid base_score: '{}'", base_score_str))?;
+            let converted = if matches!(post_transform, PostTransform::Logit)
+                && raw > 0.0
+                && raw < 1.0
+            {
+                (raw / (1.0 - raw)).ln()
+            } else {
+                raw
+            };
+            (converted, vec![])
         };
 
         // --- Parse trees ---
@@ -77,6 +89,7 @@ impl super::Frontend for XgboostFrontend {
         Ok(Forest {
             trees,
             base_score,
+            base_scores,
             aggregation: AggregationKind::Sum,
             post_transform,
         })
@@ -89,7 +102,9 @@ impl super::Frontend for XgboostFrontend {
 
 fn post_transform_for_objective(name: &str, num_class: usize) -> PostTransform {
     match name {
-        "binary:logistic" | "reg:logistic" | "binary:logitraw" => PostTransform::Logit,
+        "binary:logistic" | "reg:logistic" => PostTransform::Logit,
+        // binary:logitraw outputs raw margin (no sigmoid); sigmoid is the caller's responsibility
+        "binary:logitraw" => PostTransform::Identity,
         "multi:softmax" | "multi:softprob" => PostTransform::Softmax {
             n_classes: num_class.max(2),
         },
@@ -100,6 +115,8 @@ fn post_transform_for_objective(name: &str, num_class: usize) -> PostTransform {
 // ---------------------------------------------------------------------------
 // Tree parsing
 // ---------------------------------------------------------------------------
+
+const MAX_TREE_DEPTH: usize = 256;
 
 fn parse_tree(tv: &Value) -> Result<Tree> {
     let left = int_array(&tv["left_children"]).context("left_children")?;
@@ -116,37 +133,53 @@ fn parse_tree(tv: &Value) -> Result<Tree> {
         "XGBoost tree arrays have mismatched lengths"
     );
 
-    let root = build_node(0, &left, &right, &feat, &cond, &def_left)?;
+    let root = build_node(0, &left, &right, &feat, &cond, &def_left, 0)?;
     Ok(Tree { root, weight: 1.0 })
 }
 
 fn build_node(
-    id: usize,
-    left: &[i32],
-    right: &[i32],
-    feat: &[i32],
+    id: i64,
+    left: &[i64],
+    right: &[i64],
+    feat: &[i64],
     cond: &[f32],
-    def_left: &[i32],
+    def_left: &[i64],
+    depth: usize,
 ) -> Result<Node> {
-    anyhow::ensure!(id < left.len(), "node id {} out of bounds", id);
+    anyhow::ensure!(
+        depth <= MAX_TREE_DEPTH,
+        "tree depth exceeds maximum ({MAX_TREE_DEPTH}); possible malformed model"
+    );
+    let uid = id as usize;
+    anyhow::ensure!(uid < left.len(), "node id {} out of bounds", id);
 
-    if left[id] == -1 {
-        return Ok(Node::Leaf { value: cond[id] as f64 });
+    if left[uid] == -1 {
+        return Ok(Node::Leaf {
+            value: cond[uid] as f64,
+        });
     }
 
-    let l = build_node(left[id] as usize, left, right, feat, cond, def_left)?;
-    let r = build_node(right[id] as usize, left, right, feat, cond, def_left)?;
+    anyhow::ensure!(
+        left[uid] >= 0 && right[uid] >= 0,
+        "node {} has invalid child id (left={}, right={})",
+        id,
+        left[uid],
+        right[uid]
+    );
+
+    let l = build_node(left[uid], left, right, feat, cond, def_left, depth + 1)?;
+    let r = build_node(right[uid], left, right, feat, cond, def_left, depth + 1)?;
 
     // XGBoost split: feature[i] < threshold → yes → left child
     Ok(Node::Split {
-        feature_idx: feat[id] as usize,
+        feature_idx: feat[uid] as usize,
         split: SplitKind::Numeric {
-            threshold: cond[id],
+            threshold: cond[uid],
             operator: Operator::LessThan,
         },
         left_child: Box::new(l),
         right_child: Box::new(r),
-        missing_direction: if def_left[id] != 0 {
+        missing_direction: if def_left[uid] != 0 {
             MissingDirection::Left
         } else {
             MissingDirection::Right
@@ -158,15 +191,11 @@ fn build_node(
 // JSON array helpers
 // ---------------------------------------------------------------------------
 
-fn int_array(val: &Value) -> Result<Vec<i32>> {
+fn int_array(val: &Value) -> Result<Vec<i64>> {
     val.as_array()
         .ok_or_else(|| anyhow!("expected array, got {:?}", val.as_str().unwrap_or("?")))?
         .iter()
-        .map(|v| {
-            v.as_i64()
-                .map(|x| x as i32)
-                .ok_or_else(|| anyhow!("expected integer, got {:?}", v))
-        })
+        .map(|v| v.as_i64().ok_or_else(|| anyhow!("expected integer, got {:?}", v)))
         .collect()
 }
 
@@ -261,9 +290,23 @@ mod tests {
         // Root: split on feature 0, threshold 0.5, operator LessThan
         let root = &forest.trees[0].root;
         let (fi, th, op, left, right) = match root {
-            Node::Split { feature_idx, split: SplitKind::Numeric { threshold, operator }, left_child, right_child, .. } => {
-                (*feature_idx, *threshold, operator.clone(), left_child, right_child)
-            }
+            Node::Split {
+                feature_idx,
+                split:
+                    SplitKind::Numeric {
+                        threshold,
+                        operator,
+                    },
+                left_child,
+                right_child,
+                ..
+            } => (
+                *feature_idx,
+                *threshold,
+                operator.clone(),
+                left_child,
+                right_child,
+            ),
             _ => panic!("expected numeric split at root"),
         };
         assert_eq!(fi, 0);
@@ -284,7 +327,11 @@ mod tests {
 
         // Root split: feature 1, NaN → left (default_left = 1)
         match &forest.trees[0].root {
-            Node::Split { feature_idx, missing_direction, .. } => {
+            Node::Split {
+                feature_idx,
+                missing_direction,
+                ..
+            } => {
                 assert_eq!(*feature_idx, 1);
                 assert_eq!(*missing_direction, MissingDirection::Left);
             }
@@ -307,7 +354,10 @@ mod tests {
     #[test]
     fn test_multiclass_softmax() {
         let forest = parse(MULTICLASS_JSON);
-        assert_eq!(forest.post_transform, PostTransform::Softmax { n_classes: 3 });
+        assert_eq!(
+            forest.post_transform,
+            PostTransform::Softmax { n_classes: 3 }
+        );
         assert_eq!(forest.trees.len(), 6);
     }
 

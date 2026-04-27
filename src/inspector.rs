@@ -18,7 +18,10 @@ pub fn inspect(forest: &Forest, show_trees: bool, num_trees: usize) {
     }
 
     if show_trees {
-        print_header(&format!("TREE STRUCTURES (showing {} trees)", num_trees.min(forest.trees.len())));
+        print_header(&format!(
+            "TREE STRUCTURES (showing {} trees)",
+            num_trees.min(forest.trees.len())
+        ));
         print_tree_structures(forest, num_trees);
     }
 
@@ -75,7 +78,10 @@ fn print_tree_statistics(forest: &Forest) {
     let max_depth = depths.iter().max().copied().unwrap_or(0);
     let avg_depth = depths.iter().sum::<usize>() as f64 / depths.len().max(1) as f64;
 
-    println!("Tree depths:        min={}, max={}, avg={:.1}", min_depth, max_depth, avg_depth);
+    println!(
+        "Tree depths:        min={}, max={}, avg={:.1}",
+        min_depth, max_depth, avg_depth
+    );
 
     // Node statistics
     let total_nodes: usize = node_counts.iter().sum();
@@ -83,8 +89,14 @@ fn print_tree_statistics(forest: &Forest) {
     let avg_nodes = total_nodes as f64 / forest.trees.len() as f64;
     let avg_leaves = total_leaves as f64 / forest.trees.len() as f64;
 
-    println!("Nodes per tree:     avg={:.1} (total: {})", avg_nodes, total_nodes);
-    println!("Leaves per tree:    avg={:.1} (total: {})", avg_leaves, total_leaves);
+    println!(
+        "Nodes per tree:     avg={:.1} (total: {})",
+        avg_nodes, total_nodes
+    );
+    println!(
+        "Leaves per tree:    avg={:.1} (total: {})",
+        avg_leaves, total_leaves
+    );
 
     // Split type distribution
     let total_splits = numeric_splits + categorical_splits;
@@ -92,8 +104,14 @@ fn print_tree_statistics(forest: &Forest) {
         let numeric_pct = (numeric_splits as f64 / total_splits as f64) * 100.0;
         let categorical_pct = (categorical_splits as f64 / total_splits as f64) * 100.0;
         println!("\nSplit types:");
-        println!("  Numeric:          {} ({:.1}%)", numeric_splits, numeric_pct);
-        println!("  Categorical:      {} ({:.1}%)", categorical_splits, categorical_pct);
+        println!(
+            "  Numeric:          {} ({:.1}%)",
+            numeric_splits, numeric_pct
+        );
+        println!(
+            "  Categorical:      {} ({:.1}%)",
+            categorical_splits, categorical_pct
+        );
     }
 
     // Missing value handling
@@ -105,11 +123,18 @@ fn print_tree_statistics(forest: &Forest) {
     }
 }
 
-fn analyze_tree(node: &Node) -> (usize, usize, usize, usize, usize, HashMap<MissingDirection, usize>) {
+fn analyze_tree(
+    node: &Node,
+) -> (
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    HashMap<MissingDirection, usize>,
+) {
     match node {
-        Node::Leaf { .. } => {
-            (0, 1, 1, 0, 0, HashMap::new())
-        }
+        Node::Leaf { .. } => (0, 1, 1, 0, 0, HashMap::new()),
         Node::Split {
             split,
             left_child,
@@ -117,10 +142,22 @@ fn analyze_tree(node: &Node) -> (usize, usize, usize, usize, usize, HashMap<Miss
             missing_direction,
             ..
         } => {
-            let (left_depth, left_nodes, left_leaves, left_numeric, left_categorical, mut left_missing) =
-                analyze_tree(left_child);
-            let (right_depth, right_nodes, right_leaves, right_numeric, right_categorical, right_missing) =
-                analyze_tree(right_child);
+            let (
+                left_depth,
+                left_nodes,
+                left_leaves,
+                left_numeric,
+                left_categorical,
+                mut left_missing,
+            ) = analyze_tree(left_child);
+            let (
+                right_depth,
+                right_nodes,
+                right_leaves,
+                right_numeric,
+                right_categorical,
+                right_missing,
+            ) = analyze_tree(right_child);
 
             let depth = 1 + left_depth.max(right_depth);
             let nodes = 1 + left_nodes + right_nodes;
@@ -177,12 +214,21 @@ fn print_feature_analysis(forest: &Forest) {
         } else {
             "numeric"
         };
-        println!("  {}. Feature {:<4} ({:>12}): {} splits", idx + 1, feature_idx, feature_type, count);
+        println!(
+            "  {}. Feature {:<4} ({:>12}): {} splits",
+            idx + 1,
+            feature_idx,
+            feature_type,
+            count
+        );
     }
 
     if feature_usage.len() != max_feature_idx + 1 {
         let unused = (max_feature_idx + 1) - feature_usage.len();
-        println!("\n⚠ Warning: {} feature(s) are never used in splits", unused);
+        println!(
+            "\n⚠ Warning: {} feature(s) are never used in splits",
+            unused
+        );
     }
 }
 
@@ -191,7 +237,14 @@ fn collect_feature_usage(
     usage: &mut HashMap<usize, usize>,
     categorical: &mut std::collections::HashSet<usize>,
 ) {
-    if let Node::Split { feature_idx, split, left_child, right_child, .. } = node {
+    if let Node::Split {
+        feature_idx,
+        split,
+        left_child,
+        right_child,
+        ..
+    } = node
+    {
         *usage.entry(*feature_idx).or_insert(0) += 1;
 
         if matches!(split, SplitKind::Categorical { .. }) {
@@ -215,7 +268,12 @@ fn forest_has_categoricals(forest: &Forest) -> bool {
 fn tree_has_categoricals(node: &Node) -> bool {
     match node {
         Node::Leaf { .. } => false,
-        Node::Split { split, left_child, right_child, .. } => {
+        Node::Split {
+            split,
+            left_child,
+            right_child,
+            ..
+        } => {
             matches!(split, SplitKind::Categorical { .. })
                 || tree_has_categoricals(left_child)
                 || tree_has_categoricals(right_child)
@@ -250,12 +308,17 @@ fn print_categorical_details(forest: &Forest) {
         let max_nbits = infos.iter().map(|i| i.nbits).max().unwrap();
 
         println!("  Bitset offset range: {} to {}", min_bitoff, max_bitoff);
-        println!("  Bitset size range:   {} to {} levels", min_nbits, max_nbits);
+        println!(
+            "  Bitset size range:   {} to {} levels",
+            min_nbits, max_nbits
+        );
 
         // Show first bitset as example
         if let Some(first) = infos.first() {
-            println!("  Example bitset:      bitoff={}, nbits={}, data_len={} bytes",
-                     first.bitoff, first.nbits, first.data_len);
+            println!(
+                "  Example bitset:      bitoff={}, nbits={}, data_len={} bytes",
+                first.bitoff, first.nbits, first.data_len
+            );
             if first.data_len <= 8 {
                 print!("    Data (hex):        ");
                 for (i, byte) in first.data_sample.iter().take(first.data_len).enumerate() {
@@ -281,14 +344,27 @@ struct CategoricalSplitInfo {
 fn collect_categorical_info(node: &Node, info: &mut HashMap<usize, Vec<CategoricalSplitInfo>>) {
     match node {
         Node::Leaf { .. } => {}
-        Node::Split { feature_idx, split, left_child, right_child, .. } => {
-            if let SplitKind::Categorical { bitoff, nbits, data } = split {
-                info.entry(*feature_idx).or_default().push(CategoricalSplitInfo {
-                    bitoff: *bitoff,
-                    nbits: *nbits,
-                    data_len: data.len(),
-                    data_sample: data.iter().take(8).copied().collect(),
-                });
+        Node::Split {
+            feature_idx,
+            split,
+            left_child,
+            right_child,
+            ..
+        } => {
+            if let SplitKind::Categorical {
+                bitoff,
+                nbits,
+                data,
+            } = split
+            {
+                info.entry(*feature_idx)
+                    .or_default()
+                    .push(CategoricalSplitInfo {
+                        bitoff: *bitoff,
+                        nbits: *nbits,
+                        data_len: data.len(),
+                        data_sample: data.iter().take(8).copied().collect(),
+                    });
             }
 
             collect_categorical_info(left_child, info);
@@ -319,12 +395,24 @@ fn print_node(node: &Node, depth: usize) {
             missing_direction,
         } => {
             let split_desc = match split {
-                SplitKind::Numeric { threshold, operator } => {
+                SplitKind::Numeric {
+                    threshold,
+                    operator,
+                } => {
                     format!("x[{}] {:?} {:.6}", feature_idx, operator, threshold)
                 }
-                SplitKind::Categorical { bitoff, nbits, data } => {
-                    format!("x[{}] in bitset(off={}, bits={}, {} bytes)",
-                            feature_idx, bitoff, nbits, data.len())
+                SplitKind::Categorical {
+                    bitoff,
+                    nbits,
+                    data,
+                } => {
+                    format!(
+                        "x[{}] in bitset(off={}, bits={}, {} bytes)",
+                        feature_idx,
+                        bitoff,
+                        nbits,
+                        data.len()
+                    )
                 }
             };
 
@@ -349,17 +437,25 @@ fn print_validation(forest: &Forest) {
     }
 
     // Check for trees with only one leaf
-    let single_leaf_trees = forest.trees.iter()
+    let single_leaf_trees = forest
+        .trees
+        .iter()
         .filter(|t| matches!(t.root, Node::Leaf { .. }))
         .count();
 
     if single_leaf_trees > 0 {
-        warnings.push(format!("⚠ {} tree(s) have only a single leaf node", single_leaf_trees));
+        warnings.push(format!(
+            "⚠ {} tree(s) have only a single leaf node",
+            single_leaf_trees
+        ));
     }
 
     // Check for unusual base scores
     if forest.base_score.abs() > 1000.0 {
-        warnings.push(format!("⚠ Unusually large base score: {:.2}", forest.base_score));
+        warnings.push(format!(
+            "⚠ Unusually large base score: {:.2}",
+            forest.base_score
+        ));
     }
 
     if warnings.is_empty() {

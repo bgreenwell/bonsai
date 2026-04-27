@@ -101,6 +101,7 @@ impl super::Frontend for MojoFrontend {
         Ok(Forest {
             trees,
             base_score: metadata.init_f,
+            base_scores: vec![],
             aggregation,
             post_transform,
         })

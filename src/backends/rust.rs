@@ -1,4 +1,6 @@
-use crate::ir::{AggregationKind, Forest, MissingDirection, Node, Operator, PostTransform, SplitKind};
+use crate::ir::{
+    AggregationKind, Forest, MissingDirection, Node, Operator, PostTransform, SplitKind,
+};
 use anyhow::Result;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -60,7 +62,7 @@ pub fn generate(forest: &Forest) -> Result<String> {
             n_classes
         );
         anyhow::ensure!(
-            forest.trees.len() % n_classes == 0,
+            forest.trees.len().is_multiple_of(n_classes),
             "Tree count ({}) must be divisible by n_classes ({}) for softmax",
             forest.trees.len(),
             n_classes
@@ -77,7 +79,7 @@ pub fn generate(forest: &Forest) -> Result<String> {
         .enumerate()
         .map(|(i, tree)| {
             let fn_name = format_ident!("tree_{}", i);
-            let w = tree.weight as f64;
+            let w = tree.weight;
             quote! { Self::#fn_name(features) * #w }
         })
         .collect();
@@ -100,7 +102,9 @@ pub fn generate(forest: &Forest) -> Result<String> {
             quote! { (1.0f64 / (1.0f64 + (-raw).exp())) as f32 }
         }
         PostTransform::Log => {
-            quote! { raw.exp() as f32 }
+            // Clamp before cast: f64::exp can exceed f32::MAX for large raw scores
+            // (e.g. Poisson regression with large predictions), producing inf.
+            quote! { raw.exp().min(f32::MAX as f64) as f32 }
         }
         PostTransform::Softmax { .. } => unreachable!("handled above"),
     };
@@ -163,7 +167,13 @@ fn compile_node(node: &Node) -> TokenStream {
                     quote! { !val.is_nan() }
                 }
 
-                (_, SplitKind::Numeric { threshold, operator }) => {
+                (
+                    _,
+                    SplitKind::Numeric {
+                        threshold,
+                        operator,
+                    },
+                ) => {
                     let th = *threshold;
                     let cmp = match operator {
                         Operator::LessThan => quote! { val < #th },
@@ -185,7 +195,14 @@ fn compile_node(node: &Node) -> TokenStream {
                     }
                 }
 
-                (_, SplitKind::Categorical { bitoff, nbits, data }) => {
+                (
+                    _,
+                    SplitKind::Categorical {
+                        bitoff,
+                        nbits,
+                        data,
+                    },
+                ) => {
                     let bo = *bitoff;
                     let nb = *nbits;
                     let bytes = data.clone();
@@ -237,12 +254,17 @@ fn build_softmax_model(
     bitset_helper: &TokenStream,
     tree_fns: &[TokenStream],
 ) -> Result<TokenStream> {
-    let base = forest.base_score;
-
-    // Build per-class raw score expressions
+    // Build per-class raw score expressions.
+    // Per-class base scores take precedence over the scalar base_score (XGBoost multiclass).
     let raw_decls: Vec<TokenStream> = (0..n_classes)
         .map(|c| {
             let raw_var = format_ident!("raw_{}", c);
+            let base: f64 = if c < forest.base_scores.len() {
+                forest.base_scores[c]
+            } else {
+                forest.base_score
+            };
+
             // Trees for class c: indices c, c+n_classes, c+2*n_classes, ...
             let terms: Vec<TokenStream> = forest
                 .trees
@@ -251,7 +273,7 @@ fn build_softmax_model(
                 .filter(|(i, _)| i % n_classes == c)
                 .map(|(i, tree)| {
                     let fn_name = format_ident!("tree_{}", i);
-                    let w = tree.weight as f64;
+                    let w = tree.weight;
                     quote! { Self::#fn_name(features) * #w }
                 })
                 .collect();
@@ -269,19 +291,16 @@ fn build_softmax_model(
         .collect();
 
     // max_raw for numerical stability
-    let raw_vars: Vec<_> = (0..n_classes)
-        .map(|c| format_ident!("raw_{}", c))
-        .collect();
+    let raw_vars: Vec<_> = (0..n_classes).map(|c| format_ident!("raw_{}", c)).collect();
+    let first = &raw_vars[0]; // safe: n_classes >= 2 is enforced above
     let max_expr = raw_vars
         .iter()
         .skip(1)
-        .fold(quote! { #(#raw_vars)* }, |acc, v| quote! { #acc.max(#v) });
+        .fold(quote! { #first }, |acc, v| quote! { #acc.max(#v) });
     let max_decl = quote! { let max_raw: f64 = #max_expr; };
 
     // exp terms
-    let exp_vars: Vec<_> = (0..n_classes)
-        .map(|c| format_ident!("e_{}", c))
-        .collect();
+    let exp_vars: Vec<_> = (0..n_classes).map(|c| format_ident!("e_{}", c)).collect();
     let exp_decls: Vec<TokenStream> = raw_vars
         .iter()
         .zip(exp_vars.iter())
@@ -366,6 +385,7 @@ mod tests {
         let forest = Forest {
             trees: vec![make_tree(simple_split(0, 0.5, leaf(1.0), leaf(-1.0)))],
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
         };
@@ -380,6 +400,7 @@ mod tests {
         let forest = Forest {
             trees: vec![make_tree(leaf(0.5))],
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Logit,
         };
@@ -392,26 +413,55 @@ mod tests {
     #[test]
     fn test_generate_multiclass_softmax_3_classes() {
         // 6 trees, 3 classes: tree 0,3 → class 0; tree 1,4 → class 1; tree 2,5 → class 2
-        let trees: Vec<Tree> = (0..6)
-            .map(|i| make_tree(leaf(i as f64 * 0.1)))
-            .collect();
+        let trees: Vec<Tree> = (0..6).map(|i| make_tree(leaf(i as f64 * 0.1))).collect();
         let forest = Forest {
             trees,
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Softmax { n_classes: 3 },
         };
         let code = generate(&forest).unwrap();
 
-        assert!(code.contains("predict_proba"), "should generate predict_proba");
-        assert!(!code.contains("pub fn predict("), "should NOT generate predict");
-        assert!(code.contains("Vec < f32 >"), "return type should be Vec<f32>");
-        assert!(code.contains("max_raw"), "should include numerical stability max");
+        assert!(
+            code.contains("predict_proba"),
+            "should generate predict_proba"
+        );
+        assert!(
+            !code.contains("pub fn predict("),
+            "should NOT generate predict"
+        );
+        assert!(
+            code.contains("Vec < f32 >"),
+            "return type should be Vec<f32>"
+        );
+        assert!(
+            code.contains("max_raw"),
+            "should include numerical stability max"
+        );
         assert!(code.contains("sum_e"), "should include softmax denominator");
         // tree_0 and tree_3 both go to class 0
         assert!(code.contains("raw_0"), "class 0 raw score");
         assert!(code.contains("raw_1"), "class 1 raw score");
         assert!(code.contains("raw_2"), "class 2 raw score");
+
+        // Verify max_raw starts with a single ident, not a sequence of all raw_N vars.
+        // Bad: "let max_raw : f64 = raw_0 raw_1 raw_2 . max..."
+        // Good: "let max_raw : f64 = raw_0 . max ( raw_1 ) . max ( raw_2 ) ;"
+        let max_raw_decl_idx = code.find("let max_raw").expect("max_raw decl not found");
+        let after_max = &code[max_raw_decl_idx..];
+        assert!(
+            after_max.contains(". max"),
+            "max_raw should use .max() chaining"
+        );
+        // "raw_0 raw_1" would mean two tokens without a dot — check it's not present right after =
+        let eq_pos = after_max.find('=').expect("= not found in max_raw decl");
+        let after_eq = after_max[eq_pos + 1..].trim_start();
+        assert!(
+            !after_eq.starts_with("raw_0 raw_1"),
+            "max_raw must not expand all idents: got '{}'",
+            &after_eq[..after_eq.len().min(40)]
+        );
     }
 
     #[test]
@@ -421,10 +471,14 @@ mod tests {
         let forest = Forest {
             trees,
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Softmax { n_classes: 3 },
         };
-        assert!(generate(&forest).is_err(), "should error on indivisible tree count");
+        assert!(
+            generate(&forest).is_err(),
+            "should error on indivisible tree count"
+        );
     }
 
     #[test]
@@ -432,6 +486,7 @@ mod tests {
         let forest = Forest {
             trees: vec![make_tree(leaf(1.0))],
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
         };

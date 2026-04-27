@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Run one end-to-end test case:
@@ -19,7 +19,7 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
         .join("assets/tests")
         .join(test_dir);
 
-    let model_zip  = test_path.join("generated/model.zip");
+    let model_zip = test_path.join("generated/model.zip");
     let model_onnx = test_path.join("generated/model.onnx");
     let model_json = test_path.join("generated/model.json");
     let model_path = if model_zip.exists() {
@@ -54,7 +54,8 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
     assert!(status.success(), "bonsai transpilation failed");
 
     // 2. Verify generated code structure
-    let generated_code = fs::read_to_string(&output_path).expect("Failed to read generated model.rs");
+    let generated_code =
+        fs::read_to_string(&output_path).expect("Failed to read generated model.rs");
     if has_categoricals {
         assert!(
             generated_code.contains("fn bitset_contains"),
@@ -67,8 +68,12 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
         );
     }
     assert!(generated_code.contains("pub struct Model"));
-    // proc_macro2::to_string() adds spaces between tokens, so check prefix only
+    // proc_macro2::to_string() spaces tokens — check both name and return type separately
     assert!(generated_code.contains("pub fn predict"));
+    assert!(
+        generated_code.contains("-> f32"),
+        "predict should return f32"
+    );
 
     // 3. Load metadata — needed for categorical level → index encoding
     let metadata: serde_json::Value = serde_json::from_str(
@@ -101,7 +106,8 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
     }
 
     // 4. Parse test_data.csv
-    let csv_content = fs::read_to_string(&test_data_path).expect("generated/test_data.csv not found");
+    let csv_content =
+        fs::read_to_string(&test_data_path).expect("generated/test_data.csv not found");
     let mut csv_lines = csv_content.lines();
 
     let header: Vec<&str> = csv_lines
@@ -146,10 +152,9 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
                 let val = parts[i].trim();
                 if let Some(encoding) = cat_encodings.get(col) {
                     // Categorical: map level string → integer index as f32
-                    *encoding
-                        .get(val)
-                        .unwrap_or_else(|| panic!("unknown category '{}' for column '{}'", val, col))
-                        as f32
+                    *encoding.get(val).unwrap_or_else(|| {
+                        panic!("unknown category '{}' for column '{}'", val, col)
+                    }) as f32
                 } else if val.is_empty() || val.eq_ignore_ascii_case("nan") {
                     f32::NAN
                 } else {
@@ -167,7 +172,10 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
         ground_truth.push(gt);
     }
 
-    assert!(!feature_rows.is_empty(), "No data rows found in test_data.csv");
+    assert!(
+        !feature_rows.is_empty(),
+        "No data rows found in test_data.csv"
+    );
 
     // 5. Compile and run the model, collect predictions
     let predictions = compile_and_run_model(&output_path, n_features, &feature_rows);
@@ -181,7 +189,6 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
         ground_truth.len()
     );
 
-    let tolerance = tolerance;
     let mut mismatches = 0usize;
     for (i, (pred, gt)) in predictions.iter().zip(ground_truth.iter()).enumerate() {
         let error = (pred - gt).abs();
@@ -196,7 +203,8 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
         }
     }
     assert_eq!(
-        mismatches, 0,
+        mismatches,
+        0,
         "{}/{} predictions for '{}' exceed tolerance {}",
         mismatches,
         predictions.len(),
@@ -212,17 +220,47 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
     );
 }
 
-/// Instantiate the test harness template with the model path, compile it with rustc,
-/// pipe the feature rows through stdin, and return the predictions.
+/// Compile a harness template, pipe feature rows through stdin, collect single-value outputs.
 fn compile_and_run_model(
-    model_rs: &PathBuf,
+    model_rs: &Path,
     n_features: usize,
     feature_rows: &[Vec<f32>],
 ) -> Vec<f32> {
+    let template = include_str!("../assets/tests/common/test_harness.rs.template");
+    let raw = run_harness(model_rs, n_features, feature_rows, template);
+    raw.lines()
+        .filter_map(|l| l.trim().parse::<f32>().ok())
+        .collect()
+}
+
+/// Compile the multiclass harness, pipe feature rows, collect per-row Vec<f32> outputs.
+/// Each output line is a comma-separated list of class probabilities.
+fn compile_and_run_multiclass_model(
+    model_rs: &Path,
+    n_features: usize,
+    feature_rows: &[Vec<f32>],
+) -> Vec<Vec<f32>> {
+    let template = include_str!("../assets/tests/common/test_harness_multiclass.rs.template");
+    let raw = run_harness(model_rs, n_features, feature_rows, template);
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            l.split(',')
+                .filter_map(|v| v.trim().parse::<f32>().ok())
+                .collect()
+        })
+        .collect()
+}
+
+/// Shared: instantiate a harness template, compile with rustc, run with feature rows.
+fn run_harness(
+    model_rs: &Path,
+    n_features: usize,
+    feature_rows: &[Vec<f32>],
+    template: &str,
+) -> String {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    // Fill in the two placeholders in the template
-    let template = include_str!("../assets/tests/common/test_harness.rs.template");
     let model_abs = model_rs
         .canonicalize()
         .expect("Failed to resolve absolute path for model.rs");
@@ -234,9 +272,12 @@ fn compile_and_run_model(
     let binary_path = tmp.path().join("predictor");
     fs::write(&harness_path, &harness_src).expect("Failed to write harness.rs");
 
-    // Compile harness + embedded model with rustc
     let compile = Command::new("rustc")
-        .args([harness_path.to_str().unwrap(), "-o", binary_path.to_str().unwrap()])
+        .args([
+            harness_path.to_str().unwrap(),
+            "-o",
+            binary_path.to_str().unwrap(),
+        ])
         .output()
         .expect("rustc not found — is the Rust toolchain installed?");
     assert!(
@@ -245,12 +286,17 @@ fn compile_and_run_model(
         String::from_utf8_lossy(&compile.stderr)
     );
 
-    // Build the feature CSV to pipe through stdin (no header, NaN as "NaN")
     let input: String = feature_rows
         .iter()
         .map(|row| {
             row.iter()
-                .map(|f| if f.is_nan() { "NaN".to_string() } else { format!("{}", f) })
+                .map(|f| {
+                    if f.is_nan() {
+                        "NaN".to_string()
+                    } else {
+                        format!("{}", f)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(",")
         })
@@ -271,17 +317,170 @@ fn compile_and_run_model(
         .write_all(input.as_bytes())
         .unwrap();
 
-    let out = child.wait_with_output().expect("Failed to wait for predictor");
+    let out = child
+        .wait_with_output()
+        .expect("Failed to wait for predictor");
     assert!(
         out.status.success(),
         "Compiled predictor exited with error:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
 
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.trim().parse::<f32>().ok())
-        .collect()
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Run a multiclass end-to-end test:
+/// transpile → compile with multiclass harness → score CSV → compare per-class probabilities.
+fn run_multiclass_test_case(test_dir: &str) {
+    run_multiclass_test_case_tol(test_dir, 1e-5);
+}
+
+fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
+    let test_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/tests")
+        .join(test_dir);
+
+    let model_json = test_path.join("generated/model.json");
+    if !model_json.exists() {
+        panic!(
+            "Model file not found: {}. Run the generate.py script first.",
+            model_json.display()
+        );
+    }
+
+    let output_path = test_path.join("generated/model.rs");
+    let test_data_path = test_path.join("generated/test_data.csv");
+    let metadata_path = test_path.join("generated/metadata.json");
+
+    // 1. Transpile
+    let bonsai_bin = env!("CARGO_BIN_EXE_bonsai");
+    let status = Command::new(bonsai_bin)
+        .args([
+            "transpile",
+            "--input", model_json.to_str().unwrap(),
+            "--output", output_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("Failed to run bonsai binary");
+    assert!(status.success(), "bonsai transpilation failed");
+
+    // 2. Verify generated code uses predict_proba + bitset_contains only if needed
+    let generated_code = fs::read_to_string(&output_path).expect("Failed to read generated model.rs");
+    assert!(
+        generated_code.contains("predict_proba"),
+        "Multiclass model should generate predict_proba"
+    );
+    assert!(
+        !generated_code.contains("pub fn predict("),
+        "Multiclass model should NOT generate predict"
+    );
+
+    // 3. Load metadata → n_classes
+    let metadata: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&metadata_path).expect("generated/metadata.json not found"),
+    )
+    .expect("Failed to parse metadata.json");
+    let n_classes = metadata["n_classes"]
+        .as_u64()
+        .expect("metadata.json missing n_classes") as usize;
+
+    // 4. Parse test_data.csv
+    let csv_content = fs::read_to_string(&test_data_path).expect("generated/test_data.csv not found");
+    let mut csv_lines = csv_content.lines();
+    let header: Vec<&str> = csv_lines
+        .next()
+        .expect("test_data.csv is empty")
+        .split(',')
+        .collect();
+
+    // Feature columns = everything except target and ground_truth_proba_N columns
+    let skip_prefixes = ["target", "ground_truth_proba_"];
+    let feature_col_indices: Vec<usize> = header
+        .iter()
+        .enumerate()
+        .filter(|(_, col)| !skip_prefixes.iter().any(|pfx| col.starts_with(pfx)))
+        .map(|(i, _)| i)
+        .collect();
+    let n_features = feature_col_indices.len();
+
+    // Find ground truth column indices for each class
+    let gt_cols: Vec<usize> = (0..n_classes)
+        .map(|c| {
+            let col_name = format!("ground_truth_proba_{}", c);
+            header
+                .iter()
+                .position(|&h| h == col_name)
+                .unwrap_or_else(|| panic!("Column '{}' not found in CSV", col_name))
+        })
+        .collect();
+
+    let mut feature_rows: Vec<Vec<f32>> = Vec::new();
+    let mut ground_truth: Vec<Vec<f32>> = Vec::new();
+
+    for line in csv_lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(',').collect();
+
+        let features: Vec<f32> = feature_col_indices
+            .iter()
+            .map(|&i| {
+                let val = parts[i].trim();
+                if val.is_empty() || val.eq_ignore_ascii_case("nan") {
+                    f32::NAN
+                } else {
+                    val.parse().unwrap_or(f32::NAN)
+                }
+            })
+            .collect();
+
+        let gt: Vec<f32> = gt_cols
+            .iter()
+            .map(|&ci| parts[ci].trim().parse::<f32>().unwrap_or(f32::NAN))
+            .collect();
+
+        feature_rows.push(features);
+        ground_truth.push(gt);
+    }
+
+    assert!(!feature_rows.is_empty(), "No data rows found in test_data.csv");
+
+    // 5. Compile and run with multiclass harness
+    let predictions = compile_and_run_multiclass_model(&output_path, n_features, &feature_rows);
+
+    // 6. Validate
+    assert_eq!(predictions.len(), ground_truth.len(), "Row count mismatch");
+
+    let mut mismatches = 0usize;
+    for (i, (pred_row, gt_row)) in predictions.iter().zip(ground_truth.iter()).enumerate() {
+        assert_eq!(
+            pred_row.len(), n_classes,
+            "Row {}: expected {} class probs, got {}", i, n_classes, pred_row.len()
+        );
+        for (c, (pred, gt)) in pred_row.iter().zip(gt_row.iter()).enumerate() {
+            let error = (pred - gt).abs();
+            if error > tolerance {
+                mismatches += 1;
+                if mismatches <= 5 {
+                    eprintln!(
+                        "  row {:3} class {}: pred={:.8}  gt={:.8}  error={:.2e}",
+                        i, c, pred, gt, error
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        mismatches, 0,
+        "{} probability comparisons for '{}' exceed tolerance {}",
+        mismatches, test_dir, tolerance
+    );
+
+    println!(
+        "✓ {}: all {} rows × {} classes match within {}",
+        test_dir, predictions.len(), n_classes, tolerance
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +555,14 @@ fn test_xgboost_classification_numeric() {
     run_test_case("xgboost/classification_numeric", false);
 }
 
+#[test]
+#[ignore]
+fn test_xgboost_classification_multiclass() {
+    // Validates round-robin tree-to-class assignment and softmax numerical stability.
+    // XGBoost leaf precision: use 1e-4 tolerance (f32 accumulation over many trees).
+    run_multiclass_test_case_tol("xgboost/classification_multiclass", 1e-4);
+}
+
 // ---------------------------------------------------------------------------
 // LightGBM JSON tests
 // ---------------------------------------------------------------------------
@@ -370,6 +577,13 @@ fn test_lightgbm_regression_numeric() {
 #[ignore]
 fn test_lightgbm_classification_numeric() {
     run_test_case("lightgbm/classification_numeric", false);
+}
+
+#[test]
+#[ignore]
+fn test_lightgbm_classification_multiclass() {
+    // Validates round-robin tree-to-class assignment and softmax numerical stability.
+    run_multiclass_test_case("lightgbm/classification_multiclass");
 }
 
 // ---------------------------------------------------------------------------

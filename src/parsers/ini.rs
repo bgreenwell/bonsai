@@ -3,14 +3,14 @@ use anyhow::Result;
 /// Metadata extracted from the `model.ini` file inside an H2O MOJO archive.
 #[allow(dead_code)]
 pub struct ModelMetadata {
-    pub h2o_version:   String,
-    pub algorithm:     String,   // "gbm" or "drf"
-    pub category:      String,
-    pub n_trees:       usize,
-    pub n_features:    usize,
-    pub columns:       Vec<String>,
-    pub init_f:        f64,
-    pub distribution:  String,
+    pub h2o_version: String,
+    pub algorithm: String, // "gbm" or "drf"
+    pub category: String,
+    pub n_trees: usize,
+    pub n_features: usize,
+    pub columns: Vec<String>,
+    pub init_f: f64,
+    pub distribution: String,
     pub link_function: String,
 }
 
@@ -19,14 +19,14 @@ pub struct ModelMetadata {
 /// The format is INI-like but non-standard: the `[columns]` section contains
 /// bare column names (one per line) rather than key=value pairs.
 pub fn parse_model_ini(content: &str) -> Result<ModelMetadata> {
-    let mut h2o_version   = String::new();
-    let mut algorithm     = String::new();
-    let mut category      = String::new();
-    let mut n_trees       = 0usize;
-    let mut n_features    = 0usize;
-    let mut columns       = Vec::new();
-    let mut init_f        = 0.0f64;
-    let mut distribution  = String::new();
+    let mut h2o_version = String::new();
+    let mut algorithm = String::new();
+    let mut category = String::new();
+    let mut n_trees = 0usize;
+    let mut n_features = 0usize;
+    let mut columns = Vec::new();
+    let mut init_f = 0.0f64;
+    let mut distribution = String::new();
     let mut link_function = String::new();
 
     let mut in_columns_section = false;
@@ -50,18 +50,18 @@ pub fn parse_model_ini(content: &str) -> Result<ModelMetadata> {
         }
 
         if let Some((key, value)) = line.split_once('=') {
-            let key   = key.trim();
+            let key = key.trim();
             let value = value.trim();
 
             match key {
-                "h2o_version"  => h2o_version  = value.to_string(),
-                "algo"         => algorithm    = value.to_string(),
-                "category"     => category     = value.to_string(),
-                "n_trees"      => n_trees      = value.parse().unwrap_or(0),
-                "n_features"   => n_features   = value.parse().unwrap_or(0),
-                "init_f"       => init_f       = value.parse().unwrap_or(0.0),
+                "h2o_version" => h2o_version = value.to_string(),
+                "algo" => algorithm = value.to_string(),
+                "category" => category = value.to_string(),
+                "n_trees" => n_trees = value.parse().unwrap_or(0),
+                "n_features" => n_features = value.parse().unwrap_or(0),
+                "init_f" => init_f = value.parse().unwrap_or(0.0),
                 "distribution" => distribution = value.to_string(),
-                "link_function"=> link_function= value.to_string(),
+                "link_function" => link_function = value.to_string(),
                 _ => {}
             }
         }

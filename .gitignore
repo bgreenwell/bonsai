@@ -3,3 +3,4 @@
 *.pyc
 assets/tests/**/generated/
 .DS_Store
+model_generated.rs

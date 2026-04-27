@@ -187,3 +187,32 @@ def save_test_data(
     if categorical_arrays:
         print(f"  Categorical features: {len(categorical_arrays)}")
     print(f"  NaN values: {df.isnull().sum().sum()} ({df.isnull().sum().sum() / df.size * 100:.1f}%)")
+
+
+def save_test_data_multiclass(
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    proba_matrix: np.ndarray,
+    output_path: Path,
+) -> None:
+    """
+    Save test data for multiclass softmax models.
+
+    Args:
+        X_test: Test features (numeric only)
+        y_test: Integer class labels
+        proba_matrix: Shape (n_samples, n_classes) — per-class probabilities
+        output_path: Path to save CSV file
+    """
+    n_numeric = X_test.shape[1]
+    n_classes = proba_matrix.shape[1]
+
+    df = pd.DataFrame(X_test, columns=[f'feat_{i}' for i in range(n_numeric)])
+    df['target'] = y_test
+
+    for c in range(n_classes):
+        df[f'ground_truth_proba_{c}'] = proba_matrix[:, c]
+
+    df.to_csv(output_path, index=False)
+    print(f"✓ Saved multiclass test data to {output_path}")
+    print(f"  Samples: {len(df)}, Features: {n_numeric}, Classes: {n_classes}")

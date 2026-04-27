@@ -1,0 +1,33 @@
+// Test harness for bonsai-generated multiclass softmax models.
+// {MODEL_RS_PATH} and {MIN_FEATURES} are replaced at test time.
+
+#[path = "{MODEL_RS_PATH}"]
+mod model;
+
+use std::io::{self, BufRead};
+
+fn main() {
+    let model = model::Model;
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {
+        let line = line.unwrap();
+        let values: Vec<f32> = line
+            .split(',')
+            .map(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("nan") {
+                    f32::NAN
+                } else {
+                    trimmed.parse().unwrap_or(f32::NAN)
+                }
+            })
+            .collect();
+
+        if values.len() >= {MIN_FEATURES} {
+            let probs = model.predict_proba(&values[..{MIN_FEATURES}]);
+            let parts: Vec<String> = probs.iter().map(|p| format!("{:.10}", p)).collect();
+            println!("{}", parts.join(","));
+        }
+    }
+}

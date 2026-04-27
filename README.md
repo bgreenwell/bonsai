@@ -48,22 +48,19 @@ The inspect command shows:
 - Tree structure visualization (with --trees flag)
 - Validation warnings (unused features, unusual values)
 
-## Testing
-
-See [`assets/tests/README.md`](assets/tests/README.md) for the comprehensive test suite covering:
-- H2O MOJO (binary classification and regression)
-- sklearn ONNX (binary classification and regression)
-- Both numeric-only and categorical features
-- Edge cases (missing values, NaVsRest splits, sparse categories)
+### Generate Test Models and Data
 
 ```bash
+# Generate all test fixtures (requires Python with h2o/scikit-learn)
+./scripts/generate_all_fixtures.sh
+# or
+python3 scripts/generate_all_fixtures.py
+
 # Run cargo integration tests
 cargo test --test integration_test -- --ignored
-
-# Generate test models and data
-cd assets/tests/h2o_mojo/classification_numeric
-python generate.py
 ```
+
+See [`assets/tests/README.md`](assets/tests/README.md) for details on individual test scenarios.
 
 ## Development
 
@@ -80,7 +77,15 @@ See [`CHANGELOG.md`](CHANGELOG.md) for recent changes and fixes.
 ## Future Roadmap
 
 See [`PLAN.md`](PLAN.md) for planned features including:
-- Multi-class classification
+- CatBoost JSON support
+- Distributed Random Forest (DRF)
+- Batch scoring optimization
+- WebAssembly (WASM) target
+
+## License
+
+See LICENSE file for details.
+n
 - Distributed Random Forest (DRF)
 - XGBoost, LightGBM, CatBoost integration
 

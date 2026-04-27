@@ -20,14 +20,12 @@ impl OnnxFrontend {
 impl super::Frontend for OnnxFrontend {
     fn parse(&self, path: &Path) -> Result<Forest> {
         // 1. Read file
-        let mut file =
-            File::open(path).with_context(|| format!("Failed to open {:?}", path))?;
+        let mut file = File::open(path).with_context(|| format!("Failed to open {:?}", path))?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;
 
         // 2. Decode protobuf
-        let model =
-            ModelProto::decode(&*buffer).context("Failed to decode ONNX protobuf")?;
+        let model = ModelProto::decode(&*buffer).context("Failed to decode ONNX protobuf")?;
         let graph = model
             .graph
             .ok_or_else(|| anyhow!("ONNX Model has no graph"))?;
@@ -48,8 +46,11 @@ impl super::Frontend for OnnxFrontend {
         println!("   > Found Operator: {}", op_type);
 
         // 4. Extract attributes
-        let get_attr =
-            |name: &str| node.attribute.iter().find(|a| a.name.as_deref() == Some(name));
+        let get_attr = |name: &str| {
+            node.attribute
+                .iter()
+                .find(|a| a.name.as_deref() == Some(name))
+        };
 
         let empty_ints: Vec<i64> = vec![];
         let empty_floats: Vec<f32> = vec![];
@@ -77,6 +78,20 @@ impl super::Frontend for OnnxFrontend {
             .map(|a| &a.ints)
             .ok_or_else(|| anyhow!("Missing nodes_falsenodeids"))?;
 
+        // Fail fast if the model uses true ONNX categorical nodes — bonsai only handles
+        // numeric splits. H2O exports categoricals as label-encoded numeric features, so
+        // this attribute is absent for models bonsai was designed to consume.
+        if let Some(cat_attr) = get_attr("nodes_categorical_attributes") {
+            if !cat_attr.strings.is_empty() {
+                anyhow::bail!(
+                    "This ONNX model contains categorical node attributes \
+                     (nodes_categorical_attributes), which bonsai does not support. \
+                     Only numeric splits are handled. Re-export the model with \
+                     label-encoded categorical features."
+                );
+            }
+        }
+
         // Bug 1 fix: per-node missing-value routing.
         // 1 = NaN follows the true_child (left in our IR), 0 = NaN follows false_child (right).
         let missing_tracks_true = get_attr("nodes_missing_value_tracks_true")
@@ -84,33 +99,52 @@ impl super::Frontend for OnnxFrontend {
             .unwrap_or(&empty_ints);
 
         // --- Leaf values (regressor vs classifier) ---
-        let target_tree_ids =
-            get_attr("target_treeids").map(|a| &a.ints).unwrap_or(&empty_ints);
-        let target_node_ids =
-            get_attr("target_nodeids").map(|a| &a.ints).unwrap_or(&empty_ints);
-        let target_weights =
-            get_attr("target_weights").map(|a| &a.floats).unwrap_or(&empty_floats);
+        let target_tree_ids = get_attr("target_treeids")
+            .map(|a| &a.ints)
+            .unwrap_or(&empty_ints);
+        let target_node_ids = get_attr("target_nodeids")
+            .map(|a| &a.ints)
+            .unwrap_or(&empty_ints);
+        let target_weights = get_attr("target_weights")
+            .map(|a| &a.floats)
+            .unwrap_or(&empty_floats);
 
-        let class_tree_ids =
-            get_attr("class_treeids").map(|a| &a.ints).unwrap_or(&empty_ints);
-        let class_node_ids =
-            get_attr("class_nodeids").map(|a| &a.ints).unwrap_or(&empty_ints);
-        let class_weights =
-            get_attr("class_weights").map(|a| &a.floats).unwrap_or(&empty_floats);
+        let class_tree_ids = get_attr("class_treeids")
+            .map(|a| &a.ints)
+            .unwrap_or(&empty_ints);
+        let class_node_ids = get_attr("class_nodeids")
+            .map(|a| &a.ints)
+            .unwrap_or(&empty_ints);
+        let class_weights = get_attr("class_weights")
+            .map(|a| &a.floats)
+            .unwrap_or(&empty_floats);
         // Bug 2 fix: use class_ids to identify which weight belongs to which class.
         let class_ids = get_attr("class_ids")
             .map(|a| &a.ints)
             .unwrap_or(&empty_ints);
 
         // 5. Group nodes by tree, populating splits
+        let n_entries = tree_ids.len();
+        anyhow::ensure!(
+            node_ids.len() == n_entries
+                && feature_ids.len() == n_entries
+                && values.len() == n_entries
+                && modes.len() == n_entries
+                && true_node_ids.len() == n_entries
+                && false_node_ids.len() == n_entries,
+            "ONNX node arrays have mismatched lengths (nodes_treeids has {}, others differ)",
+            n_entries
+        );
+
         let mut trees_map: HashMap<i64, TreeBuilder> = HashMap::new();
 
-        for i in 0..tree_ids.len() {
+        for i in 0..n_entries {
             let tid = tree_ids[i];
             let builder = trees_map.entry(tid).or_default();
 
-            let mode_str =
-                std::str::from_utf8(&modes[i]).unwrap_or("BRANCH_LEQ").to_string();
+            let mode_str = std::str::from_utf8(&modes[i])
+                .unwrap_or("BRANCH_LEQ")
+                .to_string();
 
             // Bug 1 fix: read per-node flag; default false when attribute is absent.
             let tracks_true = missing_tracks_true.get(i).copied().unwrap_or(0) != 0;
@@ -147,7 +181,11 @@ impl super::Frontend for OnnxFrontend {
         //   Trees are round-robin assigned to classes: tree T → class (T % n_classes).
         //   For each leaf entry, take the weight only when class_id == (tree_id % n_classes).
         if !class_ids.is_empty() {
-            let n_classes = class_ids.iter().max().map(|&m| (m + 1) as usize).unwrap_or(1);
+            let n_classes = class_ids
+                .iter()
+                .max()
+                .map(|&m| (m + 1) as usize)
+                .unwrap_or(1);
 
             if n_classes <= 2 {
                 // Binary: take class 1 (positive). Single-output fallback: class 0.
@@ -184,10 +222,7 @@ impl super::Frontend for OnnxFrontend {
         for tid in &sorted_tids {
             let builder = &trees_map[tid];
             let root = build_recursive(0, builder)?;
-            final_trees.push(Tree {
-                root,
-                weight: 1.0,
-            });
+            final_trees.push(Tree { root, weight: 1.0 });
         }
 
         // 9. Read ensemble-level attributes
@@ -208,16 +243,20 @@ impl super::Frontend for OnnxFrontend {
 
         // For multiclass, determine n_classes from the class_ids attribute (if present).
         let n_classes_from_attr = if !class_ids.is_empty() {
-            class_ids.iter().max().map(|&m| (m + 1) as usize).unwrap_or(1)
+            class_ids
+                .iter()
+                .max()
+                .map(|&m| (m + 1) as usize)
+                .unwrap_or(1)
         } else {
             1
         };
 
         let post_transform = match onnx_post {
             "LOGISTIC" => PostTransform::Logit,
-            "SOFTMAX" | "SOFTMAX_ZERO" if n_classes_from_attr > 2 => {
-                PostTransform::Softmax { n_classes: n_classes_from_attr }
-            }
+            "SOFTMAX" | "SOFTMAX_ZERO" if n_classes_from_attr > 2 => PostTransform::Softmax {
+                n_classes: n_classes_from_attr,
+            },
             _ => PostTransform::Identity,
         };
 
@@ -237,6 +276,7 @@ impl super::Frontend for OnnxFrontend {
         Ok(Forest {
             trees: final_trees,
             base_score,
+            base_scores: vec![],
             aggregation,
             post_transform,
         })
@@ -277,9 +317,12 @@ fn build_recursive(node_id: i64, builder: &TreeBuilder) -> Result<Node> {
         )
     })?;
 
-    // Defensive: mode == "LEAF" but no weight in leaves map.
+    // Defensive: mode == "LEAF" but no weight in leaves map — this is a malformed ONNX.
     if split.mode == "LEAF" {
-        return Ok(Node::Leaf { value: 0.0 });
+        anyhow::bail!(
+            "Node ID {} has mode LEAF but no leaf weight was found in the ONNX model.",
+            node_id
+        );
     }
 
     // Recurse: true_child → left, false_child → right (our IR convention).

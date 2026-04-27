@@ -27,16 +27,13 @@ pub enum MissingDirection {
 #[derive(Debug, Clone)]
 pub enum SplitKind {
     /// Standard threshold comparison: `feature[i] <op> threshold`.
-    Numeric {
-        threshold: f32,
-        operator:  Operator,
-    },
+    Numeric { threshold: f32, operator: Operator },
     /// Categorical membership via bitset.
     /// Condition is TRUE when the integer category value is a member of the set.
     Categorical {
         bitoff: u16,
-        nbits:  u32,
-        data:   Vec<u8>,
+        nbits: u32,
+        data: Vec<u8>,
     },
 }
 
@@ -50,21 +47,23 @@ pub enum SplitKind {
 #[derive(Debug, Clone)]
 pub enum Node {
     Split {
-        feature_idx:        usize,
-        split:              SplitKind,
-        left_child:         Box<Node>,
-        right_child:        Box<Node>,
+        feature_idx: usize,
+        split: SplitKind,
+        left_child: Box<Node>,
+        right_child: Box<Node>,
         missing_direction: MissingDirection,
     },
-    Leaf { value: f64 },
+    Leaf {
+        value: f64,
+    },
 }
 
 /// A single decision tree in the ensemble.
 #[derive(Debug, Clone)]
 pub struct Tree {
-    pub root:   Node,
+    pub root: Node,
     /// Per-tree weight. 1.0 for standard GBM / RF / DRF.
-    pub weight: f32,
+    pub weight: f64,
 }
 
 /// How tree outputs are combined before the post-transform is applied.
@@ -96,11 +95,15 @@ pub enum PostTransform {
 /// Single artifact: a Frontend produces one, a Backend consumes one.
 #[derive(Debug, Clone)]
 pub struct Forest {
-    pub trees:          Vec<Tree>,
-    /// Bias / intercept added after aggregation (only for `AggregationKind::Sum`).
+    pub trees: Vec<Tree>,
+    /// Scalar bias added after aggregation (regression / binary classification).
     /// f64 to preserve precision from H2O's init_f.
-    pub base_score:     f64,
-    pub aggregation:    AggregationKind,
+    pub base_score: f64,
+    /// Per-class biases for multiclass softmax (XGBoost 3.x stores one value per class).
+    /// When non-empty, `base_scores[c]` replaces `base_score` for class c.
+    /// Length must equal `n_classes` for Softmax models; empty for all other models.
+    pub base_scores: Vec<f64>,
+    pub aggregation: AggregationKind,
     pub post_transform: PostTransform,
 }
 
@@ -147,7 +150,10 @@ mod tests {
                 assert_eq!(feature_idx, 0);
                 assert_eq!(missing_direction, MissingDirection::Right);
                 match split {
-                    SplitKind::Numeric { threshold, operator } => {
+                    SplitKind::Numeric {
+                        threshold,
+                        operator,
+                    } => {
                         assert_eq!(threshold, 5.0);
                         assert!(matches!(operator, Operator::LessThan));
                     }
@@ -181,13 +187,15 @@ mod tests {
 
         match tree.root {
             Node::Split {
-                feature_idx,
-                split,
-                ..
+                feature_idx, split, ..
             } => {
                 assert_eq!(feature_idx, 2);
                 match split {
-                    SplitKind::Categorical { bitoff, nbits, data } => {
+                    SplitKind::Categorical {
+                        bitoff,
+                        nbits,
+                        data,
+                    } => {
                         assert_eq!(bitoff, 0);
                         assert_eq!(nbits, 4);
                         assert_eq!(data, bitset_data);
@@ -201,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_missing_direction_variants() {
-        let directions = vec![
+        let directions = [
             MissingDirection::Left,
             MissingDirection::Right,
             MissingDirection::NaVsRest,
@@ -228,6 +236,7 @@ mod tests {
                 weight: 1.0,
             }],
             base_score: 0.5,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
         };
@@ -252,6 +261,7 @@ mod tests {
                 },
             ],
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Logit,
         };
@@ -265,6 +275,7 @@ mod tests {
         let forest = Forest {
             trees: vec![],
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
         };
@@ -274,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_operator_variants() {
-        let operators = vec![
+        let operators = [
             Operator::LessThan,
             Operator::LessOrEqual,
             Operator::GreaterThan,
@@ -332,7 +343,11 @@ mod tests {
 
         // Verify we can navigate the tree structure
         match &tree.root {
-            Node::Split { left_child, right_child, .. } => {
+            Node::Split {
+                left_child,
+                right_child,
+                ..
+            } => {
                 assert!(matches!(**left_child, Node::Split { .. }));
                 assert!(matches!(**right_child, Node::Split { .. }));
             }
@@ -353,7 +368,11 @@ mod tests {
         };
 
         match split {
-            SplitKind::Categorical { bitoff, nbits, data } => {
+            SplitKind::Categorical {
+                bitoff,
+                nbits,
+                data,
+            } => {
                 assert_eq!(bitoff, 0);
                 assert_eq!(nbits, 16);
                 assert_eq!(data.len(), 2);
@@ -401,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_tree_weights() {
-        let trees = vec![
+        let trees = [
             Tree {
                 root: Node::Leaf { value: 1.0 },
                 weight: 0.5,
@@ -426,6 +445,7 @@ mod tests {
         let sum_forest = Forest {
             trees: vec![],
             base_score: 0.5,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
         };
@@ -433,6 +453,7 @@ mod tests {
         let avg_forest = Forest {
             trees: vec![],
             base_score: 0.0,
+            base_scores: vec![],
             aggregation: AggregationKind::Average,
             post_transform: PostTransform::Identity,
         };
@@ -444,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_post_transform_kinds() {
-        let transforms = vec![
+        let transforms = [
             PostTransform::Identity,
             PostTransform::Logit,
             PostTransform::Log,
@@ -472,7 +493,11 @@ mod tests {
         };
 
         match split {
-            SplitKind::Categorical { bitoff, nbits, data } => {
+            SplitKind::Categorical {
+                bitoff,
+                nbits,
+                data,
+            } => {
                 assert_eq!(bitoff, 5);
                 assert_eq!(nbits, 4);
                 assert_eq!(data.len(), 1);
@@ -492,7 +517,11 @@ mod tests {
         };
 
         match split {
-            SplitKind::Categorical { bitoff, nbits, data } => {
+            SplitKind::Categorical {
+                bitoff: _,
+                nbits,
+                data,
+            } => {
                 assert_eq!(nbits, 10);
                 assert_eq!(data.len(), 2);
                 assert_eq!(data[0], 0xFF); // All 8 bits in first byte
@@ -597,6 +626,7 @@ mod tests {
                 },
             ],
             base_score: 0.1,
+            base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
         };
@@ -610,7 +640,7 @@ mod tests {
         for tree in &forest.trees {
             match tree.root {
                 Node::Leaf { value } => {
-                    assert!(value >= 1.0 && value <= 3.0);
+                    assert!((1.0..=3.0).contains(&value));
                 }
                 _ => panic!("Expected leaf nodes"),
             }

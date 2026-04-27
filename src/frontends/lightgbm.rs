@@ -77,6 +77,7 @@ impl super::Frontend for LightgbmFrontend {
         Ok(Forest {
             trees,
             base_score: 0.0,
+            base_scores: vec![],
             aggregation,
             post_transform,
         })
@@ -109,12 +110,18 @@ fn parse_tree(tv: &Value) -> Result<Tree> {
     let structure = tv
         .get("tree_structure")
         .ok_or_else(|| anyhow!("Missing 'tree_structure' in tree"))?;
-    let root = parse_node(structure).context("tree_structure")?;
+    let root = parse_node(structure, 0).context("tree_structure")?;
     // leaf values in LightGBM JSON are already scaled by shrinkage
     Ok(Tree { root, weight: 1.0 })
 }
 
-fn parse_node(node: &Value) -> Result<Node> {
+const MAX_TREE_DEPTH: usize = 256;
+
+fn parse_node(node: &Value, depth: usize) -> Result<Node> {
+    anyhow::ensure!(
+        depth <= MAX_TREE_DEPTH,
+        "tree depth exceeds maximum ({MAX_TREE_DEPTH}); possible malformed model"
+    );
     if let Some(v) = node.get("leaf_value") {
         let value = v
             .as_f64()
@@ -128,12 +135,53 @@ fn parse_node(node: &Value) -> Result<Node> {
 
     let decision_type = node["decision_type"].as_str().unwrap_or("<=");
 
+    let default_left = node["default_left"].as_bool().unwrap_or(false);
+    let left = parse_node(&node["left_child"], depth + 1).context("left_child")?;
+    let right = parse_node(&node["right_child"], depth + 1).context("right_child")?;
+
     if decision_type == "==" {
-        anyhow::bail!(
-            "Categorical splits (decision_type '==') are not yet supported. \
-             Feature index: {}",
-            feature_idx
-        );
+        // LightGBM categorical split: threshold is a "||"-separated list of category indices
+        // (e.g. "0||2||5") that go to the LEFT child.
+        //
+        // Bonsai IR convention: value IN bitset → RIGHT child.
+        // To reconcile: store the threshold set in the bitset, then swap left/right children
+        // so that IN-set rows go RIGHT (the swapped original left).
+        // Missing direction also flips because the children are swapped.
+        let threshold_str = match &node["threshold"] {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            other => anyhow::bail!("Unexpected categorical threshold type: {:?}", other),
+        };
+
+        let categories: Vec<u32> = threshold_str
+            .split("||")
+            .map(|s| s.trim().parse::<u32>())
+            .collect::<std::result::Result<_, _>>()
+            .with_context(|| {
+                format!("Invalid categorical threshold '{}': expected pipe-separated integers", threshold_str)
+            })?;
+
+        let max_cat = categories.iter().max().copied().unwrap_or(0);
+        let nbits = max_cat + 1;
+        let nbytes = ((nbits.saturating_sub(1)) / 8 + 1) as usize;
+        let mut data = vec![0u8; nbytes];
+        for &cat in &categories {
+            data[(cat / 8) as usize] |= 1u8 << (cat % 8);
+        }
+
+        return Ok(Node::Split {
+            feature_idx,
+            split: SplitKind::Categorical { bitoff: 0, nbits, data },
+            // Swap: original left (IN set) becomes right; original right becomes left.
+            left_child: Box::new(right),
+            right_child: Box::new(left),
+            // Missing direction also flips because children are swapped.
+            missing_direction: if default_left {
+                MissingDirection::Right
+            } else {
+                MissingDirection::Left
+            },
+        });
     }
 
     // threshold may be a JSON string or number depending on LightGBM version
@@ -142,9 +190,10 @@ fn parse_node(node: &Value) -> Result<Node> {
             n.as_f64()
                 .ok_or_else(|| anyhow!("threshold is not a valid float"))? as f32
         }
-        Value::String(s) => s
-            .parse::<f64>()
-            .with_context(|| format!("Invalid threshold string: '{}'", s))? as f32,
+        Value::String(s) => {
+            s.parse::<f64>()
+                .with_context(|| format!("Invalid threshold string: '{}'", s))? as f32
+        }
         other => anyhow::bail!("Unexpected threshold type: {:?}", other),
     };
 
@@ -156,14 +205,12 @@ fn parse_node(node: &Value) -> Result<Node> {
         other => anyhow::bail!("Unsupported decision_type: '{}'", other),
     };
 
-    let default_left = node["default_left"].as_bool().unwrap_or(false);
-
-    let left = parse_node(&node["left_child"]).context("left_child")?;
-    let right = parse_node(&node["right_child"]).context("right_child")?;
-
     Ok(Node::Split {
         feature_idx,
-        split: SplitKind::Numeric { threshold, operator },
+        split: SplitKind::Numeric {
+            threshold,
+            operator,
+        },
         left_child: Box::new(left),
         right_child: Box::new(right),
         missing_direction: if default_left {
@@ -295,11 +342,21 @@ mod tests {
         let (fi, th, op, left, right) = match root {
             Node::Split {
                 feature_idx,
-                split: SplitKind::Numeric { threshold, operator },
+                split:
+                    SplitKind::Numeric {
+                        threshold,
+                        operator,
+                    },
                 left_child,
                 right_child,
                 ..
-            } => (*feature_idx, *threshold, operator.clone(), left_child, right_child),
+            } => (
+                *feature_idx,
+                *threshold,
+                operator.clone(),
+                left_child,
+                right_child,
+            ),
             _ => panic!("expected numeric split at root"),
         };
 
@@ -334,7 +391,10 @@ mod tests {
     #[test]
     fn test_multiclass_softmax() {
         let forest = parse(MULTICLASS_JSON);
-        assert_eq!(forest.post_transform, PostTransform::Softmax { n_classes: 3 });
+        assert_eq!(
+            forest.post_transform,
+            PostTransform::Softmax { n_classes: 3 }
+        );
         assert_eq!(forest.trees.len(), 6);
     }
 
@@ -359,5 +419,137 @@ mod tests {
     fn test_missing_tree_info_key_errors() {
         let f = write_json(r#"{"not_tree_info": []}"#);
         assert!(LightgbmFrontend::new().parse(f.path()).is_err());
+    }
+
+    // Categorical split: decision_type "==" with threshold "0||2" (categories 0 and 2 go left)
+    const CATEGORICAL_JSON: &str = r#"{
+      "name": "tree",
+      "num_class": 1,
+      "num_tree_per_iteration": 1,
+      "objective": ["regression", "mean_squared_error"],
+      "average_output": false,
+      "tree_info": [{
+        "num_leaves": 2,
+        "shrinkage": 1.0,
+        "tree_structure": {
+          "split_index": 0,
+          "split_feature": 3,
+          "split_gain": 80.0,
+          "threshold": "0||2",
+          "decision_type": "==",
+          "default_left": false,
+          "left_child":  {"leaf_index": 0, "leaf_value": 5.0},
+          "right_child": {"leaf_index": 1, "leaf_value": -5.0}
+        }
+      }]
+    }"#;
+
+    #[test]
+    fn test_categorical_split_parses_bitset() {
+        let forest = parse(CATEGORICAL_JSON);
+        assert_eq!(forest.trees.len(), 1);
+
+        match &forest.trees[0].root {
+            Node::Split {
+                feature_idx,
+                split: SplitKind::Categorical { bitoff, nbits, data },
+                left_child,
+                right_child,
+                missing_direction,
+            } => {
+                assert_eq!(*feature_idx, 3);
+                assert_eq!(*bitoff, 0);
+                assert_eq!(*nbits, 3); // max category is 2, so nbits = 3
+                // categories 0 and 2 are set: bits 0 and 2 → 0b00000101 = 0x05
+                assert_eq!(data[0], 0x05, "bitset byte should have bits 0 and 2 set");
+
+                // After child-swap: bonsai IN-bitset → right (original left = 5.0)
+                //                   NOT in bitset   → left  (original right = -5.0)
+                match left_child.as_ref() {
+                    Node::Leaf { value } => assert!(
+                        (value + 5.0).abs() < 1e-9,
+                        "left should be original right child (-5.0), got {}", value
+                    ),
+                    _ => panic!("expected leaf"),
+                }
+                match right_child.as_ref() {
+                    Node::Leaf { value } => assert!(
+                        (value - 5.0).abs() < 1e-9,
+                        "right should be original left child (5.0), got {}", value
+                    ),
+                    _ => panic!("expected leaf"),
+                }
+
+                // default_left=false → original missing goes right (original right = -5.0)
+                // After swap: missing goes LEFT (the swapped right = original left = -5.0)
+                assert_eq!(*missing_direction, MissingDirection::Left);
+            }
+            _ => panic!("expected categorical split"),
+        }
+    }
+
+    #[test]
+    fn test_categorical_split_single_category() {
+        let json = r#"{
+          "name": "tree",
+          "num_class": 1,
+          "num_tree_per_iteration": 1,
+          "objective": ["regression", "mse"],
+          "average_output": false,
+          "tree_info": [{
+            "num_leaves": 2,
+            "shrinkage": 1.0,
+            "tree_structure": {
+              "split_index": 0, "split_feature": 1, "split_gain": 10.0,
+              "threshold": "7",
+              "decision_type": "==",
+              "default_left": true,
+              "left_child":  {"leaf_index": 0, "leaf_value": 1.0},
+              "right_child": {"leaf_index": 1, "leaf_value": 2.0}
+            }
+          }]
+        }"#;
+        let forest = parse(json);
+        match &forest.trees[0].root {
+            Node::Split {
+                split: SplitKind::Categorical { nbits, data, .. },
+                missing_direction,
+                ..
+            } => {
+                assert_eq!(*nbits, 8); // category 7 → bit 7 of first byte
+                assert_eq!(data[0], 0x80, "bit 7 should be set: 0x80");
+                // default_left=true → after swap → MissingDirection::Right
+                assert_eq!(*missing_direction, MissingDirection::Right);
+            }
+            _ => panic!("expected categorical split"),
+        }
+    }
+
+    #[test]
+    fn test_categorical_split_invalid_threshold_errors() {
+        let json = r#"{
+          "name": "tree",
+          "num_class": 1,
+          "num_tree_per_iteration": 1,
+          "objective": ["regression", "mse"],
+          "average_output": false,
+          "tree_info": [{
+            "num_leaves": 2,
+            "shrinkage": 1.0,
+            "tree_structure": {
+              "split_index": 0, "split_feature": 0, "split_gain": 10.0,
+              "threshold": "not_a_number",
+              "decision_type": "==",
+              "default_left": false,
+              "left_child":  {"leaf_index": 0, "leaf_value": 1.0},
+              "right_child": {"leaf_index": 1, "leaf_value": 2.0}
+            }
+          }]
+        }"#;
+        let f = write_json(json);
+        assert!(
+            LightgbmFrontend::new().parse(f.path()).is_err(),
+            "should fail on non-integer categorical threshold"
+        );
     }
 }

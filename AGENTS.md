@@ -36,7 +36,8 @@ cargo build --release --features scorer --bin polars_score
 
 ```
 Input Format → Frontend → IR → Backend → Output Code
-  (MOJO/ONNX)   (Parser)  (Tree) (Codegen)  (Rust .rs)
+ (JSON/ONNX/    (Parser)  (Tree) (Codegen)  (Rust .rs)
+  MOJO/.zip)
 ```
 
 ### 1. Frontends (`src/frontends/`)
@@ -54,7 +55,17 @@ Parse format-specific models into a universal intermediate representation:
   - Converts ONNX parallel arrays (nodes_treeids, nodes_featureids, etc.) to recursive tree structure
   - Builds `ir::Forest`
 
-**File extension detection in `main.rs`:** `.zip` → MOJO, `.onnx`/`.pb` → ONNX
+- **`xgboost.rs`**: XGBoost format (.json)
+  - Parses JSON model dumped via `booster.save_model()`
+  - Handles parallel array format and logit transformation for `base_score`
+  - Builds `ir::Forest`
+
+- **`lightgbm.rs`**: LightGBM format (.json)
+  - Parses JSON model dumped via `booster.dump_model()`
+  - Handles recursive tree structure and various objective types
+  - Builds `ir::Forest`
+
+**File extension detection in `main.rs`:** `.zip` → MOJO, `.onnx`/`.pb` → ONNX, `.json` → XGBoost/LightGBM (auto-detected via JSON keys)
 
 ### 2. Intermediate Representation (`src/ir.rs`)
 
@@ -64,17 +75,17 @@ Universal tree ensemble representation that's format-agnostic:
 pub struct Forest {
     pub trees: Vec<Tree>,
     pub aggregation: AggregationKind,  // Sum (GBM) | Average (RF)
-    pub post_transform: PostTransform, // Identity | Logit | Log
+    pub post_transform: PostTransform, // Identity | Logit | Log | Softmax
     pub base_score: f64,
 }
 
 pub struct Tree {
     pub root: Node,
-    pub weight: f64,
+    pub weight: f32,
 }
 
 pub enum Node {
-    Leaf { value: f32 },
+    Leaf { value: f64 },
     Split {
         feature_idx: usize,
         split: SplitKind,
@@ -160,7 +171,7 @@ Generates standalone Rust code from IR:
 - Cover 8 scenarios across H2O MOJO and sklearn ONNX, numeric and categorical features
 - All are `#[ignore]` — require Python environment and pre-generated model assets
 - Model generation scripts: `assets/tests/<format>/<scenario>/generate.py`
-- **Note:** Prediction validation is currently a stub — structure checks pass but numeric accuracy is not yet verified end-to-end
+- **Note:** Prediction validation is now real — it compiles the generated `model.rs` with `rustc` at test time, pipes feature rows through stdin, and asserts predictions match ground truth within a specified tolerance.
 
 ### Running Integration Tests
 ```bash
@@ -252,3 +263,4 @@ let code = quote! {
 - `src/parsers/tree_parser.rs` - Low-level MOJO binary tree parsing
 - `src/backends/rust.rs` - Rust code generation (especially `compile_node()`)
 - `PLAN.md` - Detailed architecture and recent bug fixes
+ fixes

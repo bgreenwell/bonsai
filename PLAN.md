@@ -198,8 +198,10 @@ Each test: transpile model → compile with rustc → score CSV → compare agai
 |------|--------|-----------|
 | `xgboost/regression_numeric` | ✅ | 1e-4 (f32 leaf accumulation) |
 | `xgboost/classification_numeric` | ✅ | 1e-5 |
+| `xgboost/classification_multiclass` | ⏭ | Requires `generate.py` to be run first |
 | `lightgbm/regression_numeric` | ✅ | 1e-5 |
 | `lightgbm/classification_numeric` | ✅ | 1e-5 |
+| `lightgbm/classification_multiclass` | ⏭ | Requires `generate.py` to be run first |
 | `sklearn_onnx/regression_numeric` | ✅ | 1e-5 |
 | `sklearn_onnx/regression_categorical` | ✅ | 1e-5 |
 | `sklearn_onnx/classification_numeric` | ✅ | 1e-5 |
@@ -213,30 +215,29 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 ## Known Limitations
 
 - **XGBoost regression leaf precision**: XGBoost stores leaves internally as `f32`, so accumulated error over many trees can reach ~4×10⁻⁵. Regression tolerance is set to 1e-4 accordingly.
-- **LightGBM categorical splits**: `decision_type == "=="` is not yet supported; will return an error.
 - **H2O MOJO generation**: Requires a Java runtime. The four H2O tests are `#[ignore]` and skip if model files are absent.
+- **ONNX true categorical nodes**: `nodes_categorical_attributes` is not supported; bonsai fails fast with a clear error. H2O-exported ONNX models label-encode categoricals as numeric features, so this does not affect the primary use case.
 
 ---
 
 ## Roadmap
 
 ### Near-Term
-- [ ] CatBoost JSON support (oblivious tree layout)
-- [ ] H2O MOJO: generate test fixtures in CI without a local Java install
-- [ ] LightGBM categorical splits (`decision_type == "=="`)
-- [ ] `bonsai inspect` output: add tree count, depth, feature count summary
-- [ ] Benchmark suite (latency vs. native XGBoost/LightGBM predict)
+- [ ] **Benchmarking Harness**: Establish `benches/` with Criterion to measure inference latency vs. native frameworks.
+- [ ] **CatBoost JSON support**: Support oblivious tree structures.
+- [ ] **CI Integration**: Run integration tests in GitHub Actions using pre-generated/cached assets.
 
 ### Mid-Term
-- [ ] SHAP value computation (feature contributions)
-- [ ] Batch scoring optimization (SIMD, Rayon parallelism)
-- [ ] WASM target (browser inference)
-- [ ] Python bindings (PyO3) for PySpark `pandas_udf`
+- [ ] **Python Bindings (PyO3)**: Generate Python-loadable modules for easy validation.
+- [ ] **SHAP value computation**: Feature contributions (TreeSHAP).
+- [ ] **SIMD Optimization**: Vectorized backend for processing multiple rows per instruction.
+- [ ] **Batch scoring optimization**: Rayon/SIMD integration in `polars_score`.
 
 ### Long-Term
-- [ ] Binary `.bon` model format (bincode/rkyv) for fast cold-start loading
-- [ ] C backend (`--backend=c`) for embedded / FFI targets
-- [ ] `bonsai pipe` streaming mode: stdin CSV → stdout scores (Spark `RDD.pipe()`)
+- [ ] **WASM target**: Browser and edge-runtime inference.
+- [ ] **Binary `.bon` format**: Fast cold-start loading via rkyv/bincode.
+- [ ] **C backend**: For embedded and legacy system FFI.
+- [ ] **`bonsai pipe`**: Streaming stdin CSV → stdout scores.
 
 ---
 

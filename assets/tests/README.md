@@ -36,6 +36,10 @@ tests/
 | sklearn ONNX | Classification | + Categorical | 🔲 Template ready |
 | sklearn ONNX | Regression | Numeric only | 🔲 Template ready |
 | sklearn ONNX | Regression | + Categorical | 🔲 Template ready |
+| XGBoost | Classification | Numeric only | ✅ Implemented |
+| XGBoost | Regression | Numeric only | ✅ Implemented |
+| LightGBM | Classification | Numeric only | ✅ Implemented |
+| LightGBM | Regression | Numeric only | ✅ Implemented |
 
 ## Running Tests
 
@@ -164,3 +168,4 @@ The `common/` directory provides shared functions:
 - `test_harness.rs.template`:
   - Template for Rust test harnesses that load generated models
   - Handles CSV input, NaN values, prediction output
+V input, NaN values, prediction output

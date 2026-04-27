@@ -49,12 +49,8 @@ impl NaSplitDir {
 /// Represents the type of split in an internal node.
 #[derive(Debug)]
 pub enum Split {
-    Numeric {
-        split_value: f32,
-    },
-    Categorical {
-        bitset: BitSet,
-    },
+    Numeric { split_value: f32 },
+    Categorical { bitset: BitSet },
 }
 
 /// Represents a node in the decision tree.
@@ -85,9 +81,15 @@ pub fn analyze_tree(tree: &TreeNode) -> TreeStats {
     fn analyze_recursive(node: &TreeNode, depth: usize) -> (usize, usize, usize) {
         match node {
             TreeNode::Leaf { .. } => (1, 1, depth),
-            TreeNode::Internal { left_child, right_child, .. } => {
-                let (left_nodes, left_leaves, left_depth) = analyze_recursive(left_child, depth + 1);
-                let (right_nodes, right_leaves, right_depth) = analyze_recursive(right_child, depth + 1);
+            TreeNode::Internal {
+                left_child,
+                right_child,
+                ..
+            } => {
+                let (left_nodes, left_leaves, left_depth) =
+                    analyze_recursive(left_child, depth + 1);
+                let (right_nodes, right_leaves, right_depth) =
+                    analyze_recursive(right_child, depth + 1);
                 (
                     1 + left_nodes + right_nodes,
                     left_leaves + right_leaves,
@@ -159,7 +161,7 @@ fn parse_node(cursor: &mut Cursor<&[u8]>) -> Result<TreeNode> {
     let na_split_dir = NaSplitDir::from_u8(na_split_dir_raw);
 
     // Check if this is a categorical split (bitset) or numeric split
-    let equal = node_type & 0x0C;  // Bits indicating split type: 0, 8, or 12
+    let equal = node_type & 0x0C; // Bits indicating split type: 0, 8, or 12
     let na_vs_rest = matches!(na_split_dir, NaSplitDir::NaVsRest);
 
     let split = if !na_vs_rest && equal != 0 {
@@ -193,7 +195,9 @@ fn parse_node(cursor: &mut Cursor<&[u8]>) -> Result<TreeNode> {
     } else if na_vs_rest {
         // FIX: NaVsRest splits solely on NaN-ness, no threshold value is stored.
         // We use NAN as a placeholder since the threshold is unused.
-        Split::Numeric { split_value: f32::NAN }
+        Split::Numeric {
+            split_value: f32::NAN,
+        }
     } else {
         // Numeric split: 4-byte float
         let split_value = cursor.read_f32::<LittleEndian>()?;
@@ -201,8 +205,8 @@ fn parse_node(cursor: &mut Cursor<&[u8]>) -> Result<TreeNode> {
     };
 
     // Decode child type flags from node_type
-    let lmask = node_type & 0x33;  // 0b00110011
-    let rmask = (node_type & 0xC0) >> 2;  // 0b11000000 >> 2
+    let lmask = node_type & 0x33; // 0b00110011
+    let rmask = (node_type & 0xC0) >> 2; // 0b11000000 >> 2
 
     let left_is_leaf = (lmask & 0x10) != 0;
     let right_is_leaf = (rmask & 0x10) != 0;
@@ -400,7 +404,7 @@ mod tests {
         data.push(0x51); // node_type: both children are leaves
         data.extend_from_slice(&2u16.to_le_bytes()); // col_id = 2
         data.push(1); // na_split_dir = NaVsRest
-        // NOTE: No split_value for NaVsRest!
+                      // NOTE: No split_value for NaVsRest!
 
         // Left child (leaf) - for non-NaN values
         data.extend_from_slice(&0.0f32.to_le_bytes());
@@ -678,11 +682,10 @@ mod tests {
     #[test]
     fn test_parse_truncated_buffer() {
         // Test error handling for malformed/truncated binary data
-        let mut data = Vec::new();
-
-        // Start a node but don't provide enough bytes
-        data.push(0x00); // node_type
-        data.push(0x00); // Only 1 byte of col_id (need 2)
+        let data = vec![
+            0x00, // node_type
+            0x00, // Only 1 byte of col_id (need 2)
+        ];
 
         let result = parse_tree(&data, &[]);
         assert!(result.is_err(), "Should fail on truncated buffer");
