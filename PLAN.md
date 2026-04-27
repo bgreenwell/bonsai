@@ -6,11 +6,12 @@
 
 ## Current Architecture
 
-Bonsai is a **single-crate transpiler** (not a workspace) that follows a three-stage compiler pipeline:
+Bonsai is a **single-crate transpiler** that follows a three-stage compiler pipeline:
 
 ```
 Input Format → Frontend → IR → Backend → Output Code
-  (MOJO/ONNX)   (Parser)  (Tree) (Codegen)  (Rust .rs)
+ (JSON/ONNX/   (Parser)  (Forest/  (Codegen)  (Rust .rs)
+  MOJO/.zip)             Tree/Node)
 ```
 
 ### Directory Structure
@@ -22,301 +23,276 @@ bonsai/
 ├── src/
 │   ├── main.rs             # CLI: parse args, orchestrate pipeline
 │   ├── ir.rs               # Intermediate representation (Forest, Node, etc.)
+│   ├── inspector.rs        # `bonsai inspect` — human-readable model summary
 │   │
 │   ├── frontends/          # Format-specific ingest + parse
+│   │   ├── mod.rs          # Frontend trait definition
 │   │   ├── mojo.rs         # H2O MOJO (.zip) → IR
-│   │   └── onnx.rs         # ONNX (.onnx) → IR
+│   │   ├── onnx.rs         # ONNX (.onnx) → IR
+│   │   ├── xgboost.rs      # XGBoost JSON (.json) → IR
+│   │   └── lightgbm.rs     # LightGBM JSON dump (.json) → IR
 │   │
-│   ├── parsers/            # Low-level binary parsers
-│   │   ├── tree_parser.rs  # H2O MOJO tree format (version 1.40)
+│   ├── parsers/            # Low-level binary parsers (H2O MOJO only)
+│   │   ├── mod.rs
+│   │   ├── tree_parser.rs  # H2O MOJO tree binary format (version 1.40)
 │   │   └── ini.rs          # MOJO model.ini metadata
 │   │
 │   ├── backends/           # Code generation
+│   │   ├── mod.rs
 │   │   └── rust.rs         # IR → Rust source code
 │   │
 │   ├── bin/
 │   │   └── polars_score.rs # Batch scoring CLI (separate binary)
 │   │
 │   └── proto/              # ONNX protobuf definitions
+│       └── onnx.proto
 │
-├── assets/examples/        # Integration tests + examples
-│   └── h2o3/               # H2O-3 GBM example (MOJO + ONNX)
+├── assets/tests/           # Integration test fixtures
+│   ├── common/             # Shared Python data generation utilities
+│   ├── xgboost/            # XGBoost regression + classification
+│   ├── lightgbm/           # LightGBM regression + classification
+│   ├── sklearn_onnx/       # sklearn GBM via ONNX (4 variants)
+│   └── h2o_mojo/           # H2O MOJO (requires Java to generate)
 │
-└── archive/                # Previous implementations (h2o-poet, transmute)
+└── tests/
+    └── integration_test.rs # End-to-end transpile → compile → score tests
 ```
 
 ---
 
 ## Implemented Features
 
-### Supported Formats
-- ✅ **H2O MOJO** (version 1.40+): Native binary format
-  - GBM (Gradient Boosting Machine)
-  - Binomial, Gaussian distributions
-  - Logit, Identity, Log link functions
-- ✅ **ONNX**: TreeEnsemble operators
-  - Via sklearn `HistGradientBoostingClassifier`
-  - Generic tree ensemble support
+### Supported Input Formats
 
-### Supported Features
-- ✅ **Numeric splits**: Threshold-based decision nodes
-- ✅ **Categorical splits**: Bitset-encoded set membership
-- ✅ **Missing value handling**: `NaVsRest`, `NaLeft`, `NaRight`, `Left`, `Right`
-- ✅ **Aggregation**: Sum (GBM), Average (Random Forest)
-- ✅ **Post-transforms**: Identity, Logit (sigmoid), Log (exp)
-- ✅ **Binary classification**: Bernoulli + logit link
-- ✅ **Regression**: Gaussian + identity link
+| Format | Notes |
+|--------|-------|
+| ✅ **H2O MOJO** (v1.40+) | GBM, DRF; Binomial + Gaussian distributions |
+| ✅ **ONNX** | `TreeEnsembleRegressor` + `TreeEnsembleClassifier` operators |
+| ✅ **XGBoost JSON** | `booster.save_model("model.json")`; handles XGBoost 3.x bracket format for `base_score` |
+| ✅ **LightGBM JSON** | `booster.dump_model()`; handles both string and array objective formats |
+
+### Supported ML Tasks
+
+| Task | Post-Transform |
+|------|---------------|
+| ✅ Regression | `Identity` or `Log` |
+| ✅ Binary classification | `Logit` (sigmoid) |
+| ✅ Multiclass classification | `Softmax { n_classes }` |
+
+### Supported Tree Features
+
+- ✅ **Numeric splits**: Threshold-based (`<`, `<=`, `>`, `>=`, `==`, `!=`)
+- ✅ **Categorical splits**: Bitset-encoded set membership (H2O MOJO / ONNX)
+- ✅ **Missing value handling**: `Left`, `Right`, `NaVsRest`, `None`
+- ✅ **Aggregation**: `Sum` (GBM) and `Average` (DRF / RF)
+- ✅ **Base score / intercept**: Preserved in f64
 
 ### Code Generation
-- ✅ **Zero dependencies**: Generated Rust code has no runtime deps
-- ✅ **Inline tree functions**: `#[inline(always)]` for each tree
-- ✅ **Conditional helpers**: `bitset_contains()` only if categoricals present
-- ✅ **f64 aggregation, f32 output**: Precision where it matters
+
+- ✅ **Zero dependencies**: Generated Rust has no runtime deps
+- ✅ **Inline tree functions**: `#[inline(always)] fn tree_N(features: &[f32]) -> f64`
+- ✅ **f64 aggregation, f32 output**: `predict` returns `f32`; internal accumulation in `f64`
+- ✅ **Conditional helpers**: `bitset_contains()` emitted only when categoricals are present
+- ✅ **Multiclass output**: `predict_proba` returns `Vec<f32>` for softmax models
 
 ---
 
-## Pipeline Details
+## IR Reference
 
-### 1. Frontend (Ingest + Parse)
-
-**`frontends/mojo.rs`:**
-- Opens `.zip` archive (MOJO format)
-- Parses `model.ini` for metadata (algo, n_trees, distribution, link_function)
-- Extracts tree files: `trees/t00_XXX.bin`, `trees/t00_XXX_aux.bin`
-- Calls `parsers/tree_parser.rs` for each tree
-- Builds `ir::Forest`
-
-**`frontends/onnx.rs`:**
-- Loads `.onnx` file via protobuf (prost)
-- Extracts `TreeEnsembleClassifier` or `TreeEnsembleRegressor` operators
-- Converts ONNX nodes/splits → `ir::Node`
-- Builds `ir::Forest`
-
-### 2. Intermediate Representation (IR)
-
-**`ir.rs`:**
 ```rust
 pub struct Forest {
-    pub trees: Vec<Tree>,
-    pub aggregation: AggregationKind,  // Sum | Average
-    pub post_transform: PostTransform, // Identity | Logit | Log
-    pub base_score: f64,
+    pub trees:          Vec<Tree>,
+    pub base_score:     f64,           // bias/intercept (Sum only)
+    pub aggregation:    AggregationKind,
+    pub post_transform: PostTransform,
+}
+
+pub enum AggregationKind { Sum, Average }
+
+pub enum PostTransform {
+    Identity,
+    Logit,                             // 1 / (1 + exp(-raw))
+    Log,                               // exp(raw)
+    Softmax { n_classes: usize },      // round-robin tree→class assignment
 }
 
 pub enum Node {
-    Leaf { value: f32 },
     Split {
-        feature_idx: usize,
-        split: SplitKind,
-        left_child: Box<Node>,
-        right_child: Box<Node>,
+        feature_idx:       usize,
+        split:             SplitKind,
+        left_child:        Box<Node>,
+        right_child:       Box<Node>,
         missing_direction: MissingDirection,
     },
+    Leaf { value: f64 },               // f64 preserves LightGBM's native precision
 }
 
 pub enum SplitKind {
-    Numeric { threshold: f32, operator: Operator },
+    Numeric     { threshold: f32, operator: Operator },
     Categorical { bitoff: u16, nbits: u32, data: Vec<u8> },
 }
 
 pub enum MissingDirection {
     Left,      // NaN always goes left
     Right,     // NaN always goes right
-    None,      // No special handling
-    NaVsRest,  // Split solely on NaN-ness (NaN→right, non-NaN→left)
+    NaVsRest,  // Split solely on NaN-ness (non-NaN→left, NaN→right); threshold ignored
+    None,      // Format did not specify; backend defaults to Right
 }
 ```
 
-### 3. Backend (Code Generation)
+---
+
+## Pipeline Details
+
+### Frontend (Ingest + Parse)
+
+**`frontends/mojo.rs`** — H2O MOJO (`.zip`):
+- Parses `model.ini` for metadata (algo, distribution, link function)
+- Extracts tree binaries (`trees/t00_XXX.bin` + `_aux.bin`)
+- Calls `parsers/tree_parser.rs` for each tree
+
+**`frontends/onnx.rs`** — ONNX (`.onnx`):
+- Decodes protobuf via `prost`
+- Extracts `TreeEnsembleRegressor` / `TreeEnsembleClassifier`
+- Handles per-node `missing_value_tracks_true` flag
+- Populates leaves from `target_weights` (regressor) or `class_weights` (classifier)
+
+**`frontends/xgboost.rs`** — XGBoost JSON (`.json`):
+- Strips XGBoost 3.x bracket notation from `base_score` (e.g., `"[0E0]"`)
+- Applies logit to `base_score` when it is in probability space (logistic objectives)
+- Flat parallel array format: `left_children`, `right_children`, `split_indices`, etc.
+
+**`frontends/lightgbm.rs`** — LightGBM JSON (`.json`):
+- Handles both string (`"binary sigmoid:1"`) and array (`["binary", "crossentropy"]`) objective formats
+- Recursive `tree_structure` node format with `leaf_value` / `split_feature`
+- Threshold encoded as string or number depending on LightGBM version
+
+### Backend (Code Generation)
 
 **`backends/rust.rs`:**
-- Generates `pub struct Model;` with `pub fn predict(&self, features: &[f32]) -> f32`
-- Creates one `tree_N()` function per tree
-- Recursively compiles `Node` → nested if/else blocks
-- Handles `NaVsRest` by emitting `!val.is_nan()` without threshold comparison
-- Outputs aggregation expression: `base_score + tree_0(...) * w0 + tree_1(...) * w1 + ...`
-- Applies post-transform: `(1.0 / (1.0 + (-raw).exp())) as f32` for logit
-
-**Generated code example:**
-```rust
-pub struct Model;
-
-impl Model {
-    pub fn predict(&self, features: &[f32]) -> f32 {
-        let raw: f64 = 0.0 + Self::tree_0(features) as f64 * 1.0
-                           + Self::tree_1(features) as f64 * 1.0;
-        (1.0f64 / (1.0f64 + (-raw).exp())) as f32
-    }
-
-    #[inline(always)]
-    fn tree_0(features: &[f32]) -> f32 {
-        {
-            let val = features[3];
-            if !val.is_nan() && (val < 0.5) {
-                0.123
-            } else {
-                -0.456
-            }
-        }
-    }
-}
-```
+- Emits one `tree_N(features: &[f32]) -> f64` function per tree
+- Recursively compiles `Node` → nested `if/else` blocks
+- `NaVsRest` emits `!val.is_nan()` with no threshold comparison
+- Aggregation for `Sum`: `base_score + Σ(Self::tree_N(features) * weight)`
+- Aggregation for `Average`: `Σ(Self::tree_N(features)) / n`
+- Post-transforms: `raw as f32` / `(1/(1+exp(-raw))) as f32` / `raw.exp() as f32`
+- Softmax: generates `predict_proba(&self, features: &[f32]) -> Vec<f32>` instead of `predict`
 
 ---
 
-## Recent Fixes (Feb 2025)
+## Testing
 
-### NaVsRest Node Bug
+### Unit Tests (53 passing)
 
-**Problem:** MOJO parser failed on binomial GBM models with "failed to fill whole buffer" error.
+- `ir.rs`: node traversal, aggregation, post-transforms, missing direction, categoricals
+- `backends/rust.rs`: code generation for identity, logit, softmax; categorical helper inclusion
+- `frontends/xgboost.rs`: tree structure, NaN routing, base_score logit conversion, multiclass
+- `frontends/lightgbm.rs`: tree structure, NaN routing, multiclass, numeric threshold as JSON number
+- `parsers/tree_parser.rs`: H2O MOJO binary format parsing
 
-**Root Cause:** `NaVsRest` split nodes don't store a numeric threshold in the MOJO binary format (they split solely on NaN-ness). The parser was incorrectly reading 4 bytes for a split_value that doesn't exist, causing misalignment.
+### Integration Tests (9/13 passing)
 
-**Fixes:**
-1. **Parser** (`parsers/tree_parser.rs:193-196`):
-   ```rust
-   } else if na_vs_rest {
-       // FIX: NaVsRest splits solely on NaN-ness, no threshold value stored
-       Split::Numeric { split_value: f32::NAN }
-   }
-   ```
+Each test: transpile model → compile with rustc → score CSV → compare against Python ground truth.
 
-2. **Codegen** (`backends/rust.rs:140-144`):
-   ```rust
-   let left_cond = match (missing_direction, split) {
-       (MissingDirection::NaVsRest, _) => {
-           quote! { !val.is_nan() }
-       }
-       // ... handle numeric/categorical normally
-   }
-   ```
+| Test | Status | Tolerance |
+|------|--------|-----------|
+| `xgboost/regression_numeric` | ✅ | 1e-4 (f32 leaf accumulation) |
+| `xgboost/classification_numeric` | ✅ | 1e-5 |
+| `lightgbm/regression_numeric` | ✅ | 1e-5 |
+| `lightgbm/classification_numeric` | ✅ | 1e-5 |
+| `sklearn_onnx/regression_numeric` | ✅ | 1e-5 |
+| `sklearn_onnx/regression_categorical` | ✅ | 1e-5 |
+| `sklearn_onnx/classification_numeric` | ✅ | 1e-5 |
+| `sklearn_onnx/classification_categorical` | ✅ | 1e-5 |
+| `h2o_mojo/*` (4 tests) | ⏭ | Require Java to generate model files |
 
-**Result:** MOJO parser now handles binomial GBM models correctly. Predictions match H2O-3 ground truth within 1e-7 (f32 precision).
-
----
-
-## Project Audit (Feb 2026)
-
-### Audit Summary
-- **Architecture**: The 3-stage pipeline is well-implemented and provides a solid foundation for multi-format support.
-- **Reliability**: Key semantic issues (categorical routing, NaN handling) are correctly addressed in the IR and Backend.
-- **Testing Gap**: **Critical deficiency** in automated testing. There are currently no unit tests in the `src/` directory, and integration tests are ignored by default and require external Python-based setup.
-- **Documentation**: `AGENTS.md` is outdated and incorrectly describes the testing state.
-
-### Audit Recommendations
-- **Testing**: Prioritize a unit test suite for core transpiler logic (`ir.rs`, `tree_parser.rs`, `rust.rs`).
-- **Automation**: Integrate validation into a standard Rust CI workflow with committed mock assets.
-- **Documentation**: Synchronize `AGENTS.md` with the actual codebase structure and testing procedures.
+Run with: `cargo test --test integration_test -- --include-ignored`
 
 ---
 
-## Ideas for Deployment: Scaling to 300M+ Records
+## Known Limitations
 
-To truly scale in enterprise environments like Databricks/Unity Catalog, `bonsai` should move from generating code to generating **deployable artifacts**.
-
-### Approach A: The "Speed Demon" (Native Rust/Polars)
-*   **Workflow**: Compile model into the `polars_score` binary. Run as a standalone Databricks Task.
-*   **Performance**: Absolute highest throughput. Limited only by I/O.
-*   **Pros**: Simplest architecture; zero overhead from Spark/Python; utilizes Polars Lazy API for memory-mapped I/O.
-
-### Approach B: The "Seamless" (Rust-backed Pandas UDF)
-*   **Workflow**: Use PyO3 to wrap the model in a Python library. Call via `pandas_udf` in PySpark.
-*   **Performance**: High. Leverages Spark for distribution while using Rust/Arrow for zero-copy scoring.
-*   **Pros**: Easiest integration into existing Spark pipelines; respects Unity Catalog permissions out-of-the-box.
-
-### Approach C: The "Enterprise" (Native Polars Plugin)
-*   **Workflow**: Compile model as a Polars Expression Plugin. Use `pl.read_delta()` from Unity Catalog.
-*   **Performance**: Ultra-High. Provides a high-level Python API with raw Rust/SIMD performance.
-*   **Pros**: Cleanest API for Data Scientists; bypasses Spark's "runtime tax."
+- **XGBoost regression leaf precision**: XGBoost stores leaves internally as `f32`, so accumulated error over many trees can reach ~4×10⁻⁵. Regression tolerance is set to 1e-4 accordingly.
+- **LightGBM categorical splits**: `decision_type == "=="` is not yet supported; will return an error.
+- **H2O MOJO generation**: Requires a Java runtime. The four H2O tests are `#[ignore]` and skip if model files are absent.
 
 ---
 
 ## Roadmap
 
-### Near-Term (Audit Fixes & Next Sprint)
-- [ ] **Core Unit Test Suite**: Implement tests for `ir.rs`, `tree_parser.rs`, and `rust.rs`.
-- [ ] **Sync Documentation**: Update `AGENTS.md` and `README.md` to reflect actual testing state.
-- [ ] **CI Integration**: Setup GitHub Actions for `cargo test` and automated integration validation.
-- [ ] Multi-class classification (softmax post-transform)
-- [ ] Distributed Random Forest (DRF) validation
-- [ ] XGBoost JSON format support
-- [ ] LightGBM JSON format support
-- [ ] Benchmark suite (latency, throughput vs H2O/sklearn)
+### Near-Term
+- [ ] CatBoost JSON support (oblivious tree layout)
+- [ ] H2O MOJO: generate test fixtures in CI without a local Java install
+- [ ] LightGBM categorical splits (`decision_type == "=="`)
+- [ ] `bonsai inspect` output: add tree count, depth, feature count summary
+- [ ] Benchmark suite (latency vs. native XGBoost/LightGBM predict)
 
 ### Mid-Term
-- [ ] CatBoost support (oblivious trees)
 - [ ] SHAP value computation (feature contributions)
-- [ ] Batch scoring optimization (SIMD, Rayon)
+- [ ] Batch scoring optimization (SIMD, Rayon parallelism)
 - [ ] WASM target (browser inference)
+- [ ] Python bindings (PyO3) for PySpark `pandas_udf`
 
 ### Long-Term
-- [ ] Spark integration (RDD.pipe() example)
-- [ ] Python bindings (PyO3) for PySpark
-- [ ] Binary model format (.bon) for fast loading
-- [ ] Model inspection CLI (`bonsai inspect model.zip`)
+- [ ] Binary `.bon` model format (bincode/rkyv) for fast cold-start loading
+- [ ] C backend (`--backend=c`) for embedded / FFI targets
+- [ ] `bonsai pipe` streaming mode: stdin CSV → stdout scores (Spark `RDD.pipe()`)
 
 ---
 
 ## Dependencies
 
 **Core:**
-- `anyhow` - Error handling
-- `clap` - CLI argument parsing
-- `zip` - MOJO archive extraction
-- `byteorder` - Little-endian binary parsing
+- `anyhow` — error handling
+- `clap` — CLI argument parsing
+- `zip` — MOJO archive extraction
+- `byteorder` — little-endian binary parsing
+- `serde_json` — XGBoost / LightGBM JSON parsing
 
 **Code Generation:**
-- `proc-macro2`, `quote` - Rust code generation
+- `proc-macro2`, `quote` — Rust token stream construction
 
 **ONNX:**
-- `prost` - Protobuf parsing (build-time via `build.rs`)
+- `prost` — protobuf decoding (generated at build time via `build.rs`)
 
-**Batch Scoring Binary:**
-- `polars` - DataFrame operations
-- `rayon` - Parallel scoring
+**Batch Scoring Binary (`polars_score`):**
+- `polars` — DataFrame I/O
+- `rayon` — parallel scoring
 
 ---
 
 ## Development Workflow
 
-### Build and Test
 ```bash
-# Build the transpiler
+# Build
 cargo build --release
 
-# Convert a model
-./target/release/bonsai --input model.zip --output model.rs
+# Transpile a model
+./target/release/bonsai transpile --input model.json --output model.rs
 
-# Run tests
+# Inspect a model
+./target/release/bonsai inspect --input model.json
+
+# Unit tests
 cargo test
 
-# Run integration tests (requires external setup)
-cargo test h2o3_integration -- --ignored
+# Integration tests (requires generated model fixtures)
+cargo test --test integration_test -- --include-ignored
 ```
 
-### Adding a New Format
+### Adding a New Frontend
 
-1. **Create frontend:** `src/frontends/newformat.rs`
-   - Parse format-specific metadata
-   - Extract tree structures
-   - Convert to `ir::Forest`
-
-2. **Add CLI flag:** Update `src/main.rs` to detect format
-
-3. **Add tests:** Create `assets/examples/newformat/` with validation
-
-4. **Update docs:** Add to README.md and this PLAN.md
+1. Create `src/frontends/newformat.rs`, implement `Frontend` trait (`parse(&self, path: &Path) -> Result<Forest>`)
+2. Add `pub mod newformat;` in `src/frontends/mod.rs`
+3. Wire detection in `src/main.rs` (`detect_and_parse_*` or the JSON probe)
+4. Add generate script under `assets/tests/newformat/*/generate.py`
+5. Add `#[ignore]` integration test in `tests/integration_test.rs`
 
 ### Adding a New Backend
 
-1. **Create backend:** `src/backends/python.rs` (or `c.rs`, `java.rs`, etc.)
-   - Implement `compile_node()` recursion
-   - Handle aggregation + post-transform
-   - Generate target language code
-
-2. **Add CLI flag:** `--backend=rust|python|c`
-
-3. **Add tests:** Validate generated code correctness
+1. Create `src/backends/newlang.rs`, implement codegen over `Forest`
+2. Add `--backend` flag to CLI in `src/main.rs`
+3. Add unit tests verifying generated code structure
 
 ---
 
@@ -324,8 +300,8 @@ cargo test h2o3_integration -- --ignored
 
 **Bonsai trims tree models for production:**
 - **No runtime dependencies**: Deploy anywhere (servers, edge, WASM)
-- **Explicit over implicit**: IR makes transformations auditable
-- **Performance by default**: Inline everything, f64 where needed
-- **Framework-agnostic**: MOJO, ONNX, XGBoost, LightGBM, CatBoost
+- **Explicit over implicit**: IR makes every transformation auditable
+- **Performance by default**: Inline everything; f64 accumulation, f32 output
+- **Framework-agnostic**: H2O, ONNX, XGBoost, LightGBM — same IR, same backend
 
 **Train in Python/R/Java. Deploy as pure Rust.**
