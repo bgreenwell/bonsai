@@ -2,5 +2,6 @@
 **/__pycache__/
 *.pyc
 assets/tests/**/generated/
+examples/**/generated/
 .DS_Store
 model_generated.rs

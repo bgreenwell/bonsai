@@ -48,6 +48,10 @@ ndarray = "0.17"
 name = "inference"
 harness = false
 
+[[bench]]
+name = "xgboost"
+harness = false
+
 [[bin]]
 name = "bonsai"
 path = "src/main.rs"
