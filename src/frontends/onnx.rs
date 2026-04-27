@@ -133,7 +133,7 @@ impl super::Frontend for OnnxFrontend {
             let builder = trees_map.entry(target_tree_ids[i]).or_default();
             builder
                 .leaves
-                .insert(target_node_ids[i], target_weights[i]);
+                .insert(target_node_ids[i], target_weights[i] as f64);
         }
 
         // 7. Populate leaf values — classifier path
@@ -159,7 +159,7 @@ impl super::Frontend for OnnxFrontend {
                     let tid = class_tree_ids[i];
                     let nid = class_node_ids[i];
                     let builder = trees_map.entry(tid).or_default();
-                    builder.leaves.insert(nid, class_weights[i]);
+                    builder.leaves.insert(nid, class_weights[i] as f64);
                 }
             } else {
                 // Multiclass: tree T owns class (T % n_classes).
@@ -171,7 +171,7 @@ impl super::Frontend for OnnxFrontend {
                     }
                     let nid = class_node_ids[i];
                     let builder = trees_map.entry(tid).or_default();
-                    builder.leaves.insert(nid, class_weights[i]);
+                    builder.leaves.insert(nid, class_weights[i] as f64);
                 }
             }
         }
@@ -250,7 +250,7 @@ impl super::Frontend for OnnxFrontend {
 #[derive(Default)]
 struct TreeBuilder {
     splits: HashMap<i64, SplitInfo>,
-    leaves: HashMap<i64, f32>,
+    leaves: HashMap<i64, f64>,
 }
 
 struct SplitInfo {

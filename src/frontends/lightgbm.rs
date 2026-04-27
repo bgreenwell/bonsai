@@ -28,12 +28,28 @@ impl super::Frontend for LightgbmFrontend {
         let num_tree_per_iteration: usize =
             root["num_tree_per_iteration"].as_u64().unwrap_or(1) as usize;
 
-        // objective is an array of strings: ["binary", "crossentropy"] etc.
-        let objective_parts: Vec<&str> = root["objective"]
-            .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-            .unwrap_or_default();
-        let objective_name = objective_parts.first().copied().unwrap_or("regression");
+        // objective may be a JSON array ["binary", "crossentropy"] or a
+        // space-separated string "binary sigmoid:1" depending on LightGBM version
+        let objective_name_owned: String;
+        let objective_name = match &root["objective"] {
+            serde_json::Value::Array(arr) => {
+                objective_name_owned = arr
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("regression")
+                    .to_string();
+                objective_name_owned.as_str()
+            }
+            serde_json::Value::String(s) => {
+                objective_name_owned = s
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("regression")
+                    .to_string();
+                objective_name_owned.as_str()
+            }
+            _ => "regression",
+        };
         println!("   > objective: {}", objective_name);
 
         let average_output = root["average_output"].as_bool().unwrap_or(false);
@@ -102,7 +118,7 @@ fn parse_node(node: &Value) -> Result<Node> {
     if let Some(v) = node.get("leaf_value") {
         let value = v
             .as_f64()
-            .ok_or_else(|| anyhow!("leaf_value is not a number: {:?}", v))? as f32;
+            .ok_or_else(|| anyhow!("leaf_value is not a number: {:?}", v))?;
         return Ok(Node::Leaf { value });
     }
 

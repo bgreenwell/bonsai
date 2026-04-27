@@ -56,7 +56,7 @@ pub enum Node {
         right_child:        Box<Node>,
         missing_direction: MissingDirection,
     },
-    Leaf { value: f32 },
+    Leaf { value: f64 },
 }
 
 /// A single decision tree in the ensemble.

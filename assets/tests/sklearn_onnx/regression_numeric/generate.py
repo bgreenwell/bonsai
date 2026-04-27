@@ -7,9 +7,9 @@ import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "common"))
-from generators import make_synthetic_data, inject_nans, save_test_data
+from generators import make_synthetic_data, save_test_data
 
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.model_selection import train_test_split
 from skl2onnx import convert_sklearn
 from skl2onnx.common.data_types import FloatTensorType
@@ -20,7 +20,6 @@ N_TEST = 100
 N_TREES = 50
 MAX_DEPTH = 5
 N_NUMERIC = 10
-NAN_PCT = 0.05
 
 def main():
     print("=" * 70)
@@ -30,26 +29,22 @@ def main():
     output_dir = Path(__file__).parent / "generated"
     output_dir.mkdir(exist_ok=True)
 
-    # Generate data
     print("\n[1/5] Generating synthetic data...")
     X, y = make_synthetic_data(N_SAMPLES, N_NUMERIC, task="regression", seed=SEED)
-    X = inject_nans(X, NAN_PCT, seed=SEED)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=N_TEST, random_state=SEED
     )
     print(f"   Train: {X_train.shape[0]} samples, {N_NUMERIC} features")
 
-    # Train sklearn model
-    print("\n[2/5] Training sklearn HistGradientBoostingRegressor...")
-    reg = HistGradientBoostingRegressor(
-        max_iter=N_TREES,
+    print("\n[2/5] Training sklearn GradientBoostingRegressor...")
+    reg = GradientBoostingRegressor(
+        n_estimators=N_TREES,
         max_depth=MAX_DEPTH,
         random_state=SEED,
     )
     reg.fit(X_train, y_train)
-    print(f"   Model trained: {len(reg._predictors[0])} trees")
+    print(f"   Model trained: {len(reg.estimators_)} trees")
 
-    # Export ONNX
     print("\n[3/5] Exporting to ONNX...")
     initial_type = [("float_input", FloatTensorType([None, N_NUMERIC]))]
     onnx_model = convert_sklearn(reg, initial_types=initial_type, target_opset=14)
@@ -58,24 +53,20 @@ def main():
         f.write(onnx_model.SerializeToString())
     print(f"   ✓ ONNX saved: {onnx_path}")
 
-    # Save test data
     print("\n[4/5] Generating ground truth...")
     ground_truth = reg.predict(X_test)
     save_test_data(X_test, y_test, ground_truth, None, None,
                    output_dir / "test_data.csv", "regression")
 
-    # Metadata
     print("\n[5/5] Saving metadata...")
     with open(output_dir / "metadata.json", "w") as f:
         json.dump({
             "format": "sklearn_onnx", "task": "regression",
             "n_trees": N_TREES, "n_numeric_features": N_NUMERIC,
-            "n_categorical_features": 0, "seed": SEED
+            "n_categorical_features": 0, "seed": SEED,
         }, f, indent=2)
 
-    print("\n" + "=" * 70)
-    print("✓ SUCCESS!")
-    print("=" * 70)
+    print("\n✓ SUCCESS!")
 
 if __name__ == "__main__":
     main()

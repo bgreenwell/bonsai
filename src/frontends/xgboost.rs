@@ -29,9 +29,12 @@ impl super::Frontend for XgboostFrontend {
         let model_param = &learner["learner_model_param"];
 
         let base_score_str = model_param["base_score"].as_str().unwrap_or("0.5");
-        let base_score_raw: f64 = base_score_str
+        // XGBoost 3.x wraps base_score in brackets, e.g. "[0E0]" → "0E0"
+        let base_score_clean = base_score_str.trim_matches(|c| c == '[' || c == ']');
+        let base_score_raw: f64 = base_score_clean
             .parse()
             .with_context(|| format!("Invalid base_score: '{}'", base_score_str))?;
+
 
         let num_class: usize = model_param["num_class"]
             .as_str()
@@ -46,7 +49,7 @@ impl super::Frontend for XgboostFrontend {
 
         let post_transform = post_transform_for_objective(objective_name, num_class);
 
-        // XGBoost < 1.6 stored base_score in output (probability) space for logistic objectives.
+        // XGBoost stores base_score in output (probability) space for logistic objectives.
         // If it looks like a probability (0 < x < 1), apply logit to convert to margin space.
         let base_score = if matches!(post_transform, PostTransform::Logit)
             && base_score_raw > 0.0
@@ -128,7 +131,7 @@ fn build_node(
     anyhow::ensure!(id < left.len(), "node id {} out of bounds", id);
 
     if left[id] == -1 {
-        return Ok(Node::Leaf { value: cond[id] });
+        return Ok(Node::Leaf { value: cond[id] as f64 });
     }
 
     let l = build_node(left[id] as usize, left, right, feat, cond, def_left)?;

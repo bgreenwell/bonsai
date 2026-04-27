@@ -42,7 +42,6 @@ def main():
     params = {
         "objective": "binary:logistic",
         "max_depth": MAX_DEPTH,
-        "base_score": 0.0,
         "seed": SEED,
     }
     model = xgb.train(params, dtrain, num_boost_round=N_TREES)

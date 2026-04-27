@@ -43,7 +43,6 @@ def main():
         "objective": "reg:squarederror",
         "n_estimators": N_TREES,
         "max_depth": MAX_DEPTH,
-        "base_score": 0.0,   # 0.0 to avoid version-specific logit conversion
         "seed": SEED,
     }
     model = xgb.train(params, dtrain, num_boost_round=N_TREES)

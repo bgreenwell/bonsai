@@ -111,7 +111,7 @@ impl super::Frontend for MojoFrontend {
 fn convert_node(node: &tree_parser::TreeNode) -> Node {
     match node {
         tree_parser::TreeNode::Leaf { prediction } => Node::Leaf {
-            value: *prediction,
+            value: *prediction as f64,
         },
 
         tree_parser::TreeNode::Internal {

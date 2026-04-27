@@ -107,8 +107,8 @@ def add_categorical_features(
 
         categorical_arrays.append(cat_feature)
 
-        # Add effect to target
-        # For each level, add/subtract from target
+        # Add effect to target (cast to float to support both regression and classification)
+        y = y.astype(float)
         for j, level in enumerate(levels):
             mask = cat_feature == level
             if j == 0:

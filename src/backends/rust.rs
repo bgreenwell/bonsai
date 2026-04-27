@@ -44,7 +44,7 @@ pub fn generate(forest: &Forest) -> Result<String> {
             let body = compile_node(&tree.root);
             quote! {
                 #[inline(always)]
-                fn #fn_name(features: &[f32]) -> f32 {
+                fn #fn_name(features: &[f32]) -> f64 {
                     #body
                 }
             }
@@ -78,7 +78,7 @@ pub fn generate(forest: &Forest) -> Result<String> {
         .map(|(i, tree)| {
             let fn_name = format_ident!("tree_{}", i);
             let w = tree.weight as f64;
-            quote! { Self::#fn_name(features) as f64 * #w }
+            quote! { Self::#fn_name(features) * #w }
         })
         .collect();
 
@@ -252,7 +252,7 @@ fn build_softmax_model(
                 .map(|(i, tree)| {
                     let fn_name = format_ident!("tree_{}", i);
                     let w = tree.weight as f64;
-                    quote! { Self::#fn_name(features) as f64 * #w }
+                    quote! { Self::#fn_name(features) * #w }
                 })
                 .collect();
 
@@ -340,7 +340,7 @@ mod tests {
     use super::*;
     use crate::ir::*;
 
-    fn leaf(v: f32) -> Node {
+    fn leaf(v: f64) -> Node {
         Node::Leaf { value: v }
     }
 
@@ -393,7 +393,7 @@ mod tests {
     fn test_generate_multiclass_softmax_3_classes() {
         // 6 trees, 3 classes: tree 0,3 → class 0; tree 1,4 → class 1; tree 2,5 → class 2
         let trees: Vec<Tree> = (0..6)
-            .map(|i| make_tree(leaf(i as f32 * 0.1)))
+            .map(|i| make_tree(leaf(i as f64 * 0.1)))
             .collect();
         let forest = Forest {
             trees,
