@@ -103,6 +103,7 @@ bonsai/
 pub struct Forest {
     pub trees:          Vec<Tree>,
     pub base_score:     f64,           // bias/intercept (Sum only)
+    pub base_scores:    Vec<f64>,      // per-class biases (XGBoost multiclass)
     pub aggregation:    AggregationKind,
     pub post_transform: PostTransform,
 }
@@ -182,7 +183,7 @@ pub enum MissingDirection {
 
 ## Testing
 
-### Unit Tests (53 passing)
+### Unit Tests (56 passing)
 
 - `ir.rs`: node traversal, aggregation, post-transforms, missing direction, categoricals
 - `backends/rust.rs`: code generation for identity, logit, softmax; categorical helper inclusion
@@ -190,7 +191,7 @@ pub enum MissingDirection {
 - `frontends/lightgbm.rs`: tree structure, NaN routing, multiclass, numeric threshold as JSON number
 - `parsers/tree_parser.rs`: H2O MOJO binary format parsing
 
-### Integration Tests (9/13 passing)
+### Integration Tests (11/15 passing)
 
 Each test: transpile model → compile with rustc → score CSV → compare against Python ground truth.
 
@@ -198,10 +199,10 @@ Each test: transpile model → compile with rustc → score CSV → compare agai
 |------|--------|-----------|
 | `xgboost/regression_numeric` | ✅ | 1e-4 (f32 leaf accumulation) |
 | `xgboost/classification_numeric` | ✅ | 1e-5 |
-| `xgboost/classification_multiclass` | ⏭ | Requires `generate.py` to be run first |
+| `xgboost/classification_multiclass` | ✅ | 1e-4 |
 | `lightgbm/regression_numeric` | ✅ | 1e-5 |
 | `lightgbm/classification_numeric` | ✅ | 1e-5 |
-| `lightgbm/classification_multiclass` | ⏭ | Requires `generate.py` to be run first |
+| `lightgbm/classification_multiclass` | ✅ | 1e-5 |
 | `sklearn_onnx/regression_numeric` | ✅ | 1e-5 |
 | `sklearn_onnx/regression_categorical` | ✅ | 1e-5 |
 | `sklearn_onnx/classification_numeric` | ✅ | 1e-5 |
@@ -223,14 +224,15 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 ## Roadmap
 
 ### Near-Term
-- [ ] **Benchmarking Harness**: Establish `benches/` with Criterion to measure inference latency vs. native frameworks.
+- [x] **Benchmarking Harness**: `benches/xgboost.rs` (Criterion) + `examples/xgboost_benchmark/` (Python). bonsai ~137 ns/row vs ort ~3.5 µs vs Python XGBoost ~46 µs.
 - [ ] **CatBoost JSON support**: Support oblivious tree structures.
 - [ ] **CI Integration**: Run integration tests in GitHub Actions using pre-generated/cached assets.
 
 ### Mid-Term
 - [ ] **Python Bindings (PyO3)**: Generate Python-loadable modules for easy validation.
 - [ ] **SHAP value computation**: Feature contributions (TreeSHAP).
-- [ ] **SIMD Optimization**: Vectorized backend for processing multiple rows per instruction.
+- [ ] **SIMD Optimization — Phase 1**: `predict_batch(features: &[f32], n_features: usize, out: &mut [f32])` scalar loop; enables LLVM auto-vectorization of tree-score accumulation.
+- [ ] **SIMD Optimization — Phase 2**: Oblivious tree evaluation via `std::simd` — evaluate all nodes branchlessly, `select` the leaf. Process 8–16 rows per SIMD lane. Targets trees ≤ depth 8.
 - [ ] **Batch scoring optimization**: Rayon/SIMD integration in `polars_score`.
 
 ### Long-Term

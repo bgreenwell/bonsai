@@ -8,8 +8,10 @@ Transpile machine learning tree ensemble models to standalone Rust code.
 
 ## Supported Formats
 
-- **H2O-3**: MOJO (native binary format) and ONNX (via onnxmltools)
-- **ONNX**: Generic tree ensemble models from multiple frameworks
+- **H2O-3**: MOJO (native binary format, `.zip`)
+- **ONNX**: Generic tree ensemble models from any framework (`.onnx`)
+- **XGBoost**: Native JSON format (`booster.save_model("model.json")`)
+- **LightGBM**: JSON dump format (`booster.dump_model()`)
 
 ## Usage
 
@@ -57,7 +59,7 @@ The inspect command shows:
 python3 scripts/generate_all_fixtures.py
 
 # Run cargo integration tests
-cargo test --test integration_test -- --ignored
+cargo test --test integration_test -- --include-ignored
 ```
 
 See [`assets/tests/README.md`](assets/tests/README.md) for details on individual test scenarios.
@@ -74,20 +76,17 @@ cargo test -- --ignored
 
 See [`CHANGELOG.md`](CHANGELOG.md) for recent changes and fixes.
 
+## Benchmarks
+
+See [`examples/xgboost_benchmark/`](examples/xgboost_benchmark/) for a full comparison of bonsai vs ONNX Runtime (Python + Rust) on a 100-tree XGBoost model. On Apple M-series hardware, bonsai scores a single row in **~137 ns** vs ~3.5 µs for the `ort` Rust crate.
+
 ## Future Roadmap
 
 See [`PLAN.md`](PLAN.md) for planned features including:
 - CatBoost JSON support
-- Distributed Random Forest (DRF)
-- Batch scoring optimization
+- SIMD batch optimization (`predict_batch`)
+- Python bindings (PyO3)
 - WebAssembly (WASM) target
-
-## License
-
-See LICENSE file for details.
-n
-- Distributed Random Forest (DRF)
-- XGBoost, LightGBM, CatBoost integration
 
 ## License
 

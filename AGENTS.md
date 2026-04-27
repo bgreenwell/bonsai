@@ -15,9 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 cargo build --release
 
 # Convert a model to Rust code
-./target/release/bonsai --input model.zip --output model.rs
+./target/release/bonsai transpile --input model.zip --output model.rs
 # Or during development:
-cargo run -- --input model.zip --output model.rs
+cargo run -- transpile --input model.zip --output model.rs
 
 # Run all unit tests
 cargo test
@@ -77,11 +77,12 @@ pub struct Forest {
     pub aggregation: AggregationKind,  // Sum (GBM) | Average (RF)
     pub post_transform: PostTransform, // Identity | Logit | Log | Softmax
     pub base_score: f64,
+    pub base_scores: Vec<f64>,         // per-class biases (XGBoost multiclass)
 }
 
 pub struct Tree {
     pub root: Node,
-    pub weight: f32,
+    pub weight: f64,
 }
 
 pub enum Node {
@@ -163,12 +164,12 @@ Generates standalone Rust code from IR:
 - Located in same file as code under test (`#[cfg(test)] mod tests`)
 - **`src/ir.rs`**: ~19 tests covering Forest/Tree/Node construction, categorical semantics, weight handling
 - **`src/parsers/tree_parser.rs`**: ~18 tests covering binary parsing, NaVsRest nodes, categorical bitsets
-- **`src/backends/rust.rs`**: no unit tests yet (planned)
+- **`src/backends/rust.rs`**: 5 tests covering identity, logit, softmax codegen, categorical helper, odd-tree-count rejection
 - Run with: `cargo test`
 
 ### Integration Tests
 - Located in `tests/integration_test.rs` and `assets/tests/`
-- Cover 8 scenarios across H2O MOJO and sklearn ONNX, numeric and categorical features
+- Cover 15 scenarios across XGBoost, LightGBM, sklearn ONNX, and H2O MOJO
 - All are `#[ignore]` — require Python environment and pre-generated model assets
 - Model generation scripts: `assets/tests/<format>/<scenario>/generate.py`
 - **Note:** Prediction validation is now real — it compiles the generated `model.rs` with `rustc` at test time, pipes feature rows through stdin, and asserts predictions match ground truth within a specified tolerance.
@@ -176,11 +177,11 @@ Generates standalone Rust code from IR:
 ### Running Integration Tests
 ```bash
 # Generate model assets first (requires Python + h2o or sklearn)
-cd assets/tests/h2o_mojo/classification_numeric
-python generate.py
+cd assets/tests/xgboost/regression_numeric
+uv run python generate.py
 
 # Run integration tests
-cargo test --test integration_test -- --ignored
+cargo test --test integration_test -- --include-ignored
 ```
 
 ## Code Generation with quote! and proc-macro2
@@ -262,5 +263,4 @@ let code = quote! {
 - `src/frontends/mojo.rs` - H2O MOJO parser
 - `src/parsers/tree_parser.rs` - Low-level MOJO binary tree parsing
 - `src/backends/rust.rs` - Rust code generation (especially `compile_node()`)
-- `PLAN.md` - Detailed architecture and recent bug fixes
- fixes
+- `PLAN.md` - Detailed architecture and roadmap
