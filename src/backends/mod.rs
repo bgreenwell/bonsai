@@ -8,3 +8,4 @@ pub trait Backend {
 }
 
 pub mod rust;
+pub mod rust_array;

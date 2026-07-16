@@ -37,6 +37,10 @@ bonsai transpile --input model.json --output model.rs
 bonsai inspect --input model.json
 ```
 
+Very large forests (above ~10k nodes) automatically use a flattened array
+layout that keeps rustc compile times low; override with
+`--layout {auto,ifelse,array}`.
+
 The generated `model.rs` exposes a `Model` struct with `predict` (scalar),
 `predict_batch` (high-throughput batch), `predict_proba` (classification
 probabilities), and, for CatBoost models with categorical features,

@@ -6,7 +6,106 @@ use anyhow::Result;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-/// Generate a standalone Rust source file from the given forest.
+/// Code layout strategy for the generated Rust source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    /// Pick automatically: array layout for large numeric-only forests,
+    /// if/else otherwise.
+    #[default]
+    Auto,
+    /// One nested if/else function per tree. Fastest at small model sizes;
+    /// generated source grows with every node.
+    IfElse,
+    /// Flattened static arrays walked by a loop. Keeps rustc compile time
+    /// practical for very large forests. Numeric splits only.
+    Array,
+}
+
+/// Node count above which `Layout::Auto` switches to the array layout.
+/// Below this, nested if/else compiles quickly and benchmarks faster.
+pub const ARRAY_LAYOUT_NODE_THRESHOLD: usize = 10_000;
+
+/// Decide which concrete layout to use for this forest.
+pub fn resolve_layout(forest: &Forest, requested: Layout) -> Result<Layout> {
+    let array_ok =
+        forest.catboost_metadata.is_none() && forest.trees.iter().all(|t| numeric_only(&t.root));
+
+    match requested {
+        Layout::IfElse => Ok(Layout::IfElse),
+        Layout::Array => {
+            anyhow::ensure!(
+                array_ok,
+                "Array layout supports numeric splits only; this model contains \
+                 categorical splits or CatBoost CTR features. Use --layout auto or ifelse."
+            );
+            Ok(Layout::Array)
+        }
+        Layout::Auto => {
+            // Oblivious (CatBoost-style) trees already compile to compact
+            // leaf-table lookups, so the if/else path stays cheap for them.
+            let all_oblivious = forest
+                .trees
+                .iter()
+                .all(|t| t.root.get_oblivious_splits().is_some());
+            let n_nodes: usize = forest.trees.iter().map(|t| count_nodes(&t.root)).sum();
+            if array_ok && !all_oblivious && n_nodes > ARRAY_LAYOUT_NODE_THRESHOLD {
+                Ok(Layout::Array)
+            } else {
+                Ok(Layout::IfElse)
+            }
+        }
+    }
+}
+
+fn numeric_only(node: &Node) -> bool {
+    match node {
+        Node::Leaf { .. } => true,
+        Node::Split {
+            split,
+            left_child,
+            right_child,
+            ..
+        } => {
+            matches!(split, SplitKind::Numeric { .. })
+                && numeric_only(left_child)
+                && numeric_only(right_child)
+        }
+    }
+}
+
+fn count_nodes(node: &Node) -> usize {
+    match node {
+        Node::Leaf { .. } => 1,
+        Node::Split {
+            left_child,
+            right_child,
+            ..
+        } => 1 + count_nodes(left_child) + count_nodes(right_child),
+    }
+}
+
+/// Generate a standalone Rust source file from the given forest, choosing
+/// the layout automatically. See [`generate_with_layout`].
+/// The binary resolves the layout itself to report it; this wrapper is the
+/// stable entry point for tests and future library consumers.
+#[allow(dead_code)]
+pub fn generate(forest: &Forest) -> Result<String> {
+    generate_with_layout(forest, Layout::Auto)
+}
+
+/// Generate a standalone Rust source file from the given forest using the
+/// requested layout (resolving `Auto` per [`resolve_layout`]).
+pub fn generate_with_layout(forest: &Forest, layout: Layout) -> Result<String> {
+    if forest.trees.is_empty() {
+        anyhow::bail!("Cannot generate code for an empty forest (0 trees).");
+    }
+    match resolve_layout(forest, layout)? {
+        Layout::Array => super::rust_array::generate(forest),
+        _ => generate_ifelse(forest),
+    }
+}
+
+/// Generate the if/else layout:
 ///
 /// The output is a single module containing:
 /// - A `bitset_contains` helper (only if categorical splits are present)
@@ -14,11 +113,7 @@ use quote::{format_ident, quote};
 /// - A `Model` unit struct
 /// - `Model::predict(&self, features: &[f32]) -> f32`
 /// - One `#[inline(always)]` tree function per tree in the forest
-pub fn generate(forest: &Forest) -> Result<String> {
-    if forest.trees.is_empty() {
-        anyhow::bail!("Cannot generate code for an empty forest (0 trees).");
-    }
-
+fn generate_ifelse(forest: &Forest) -> Result<String> {
     // --- Conditional: bitset helper ---
     let needs_bitset = forest.trees.iter().any(|t| has_categorical(&t.root));
     let bitset_helper = if needs_bitset {
@@ -116,17 +211,7 @@ pub fn generate(forest: &Forest) -> Result<String> {
         }
     };
 
-    let post_transform_expr = match &forest.post_transform {
-        PostTransform::Identity => quote! { raw as f32 },
-        PostTransform::Logit => {
-            quote! { (1.0f64 / (1.0f64 + (-raw).exp())) as f32 }
-        }
-        PostTransform::Log => {
-            // Clamp before cast: exp() can exceed f32::MAX for large raw scores.
-            quote! { raw.exp().min(f32::MAX as f64) as f32 }
-        }
-        PostTransform::Softmax { .. } => unreachable!("handled above"),
-    };
+    let post_transform_expr = post_transform_expr(&forest.post_transform);
 
     let (predict_cat_method, internal_predict_call) = if forest.catboost_metadata.is_some() {
         (
@@ -440,12 +525,52 @@ fn build_catboost_helpers(meta: &CatboostMetadata) -> Result<TokenStream> {
 // ---------------------------------------------------------------------------
 
 /// Recursively compile an IR node into a token stream of nested if/else blocks.
+/// Map a scalar post-transform to the expression applied to `raw: f64`.
+/// Softmax is handled by its own model builder and never reaches here.
+pub(crate) fn post_transform_expr(post_transform: &PostTransform) -> TokenStream {
+    match post_transform {
+        PostTransform::Identity => quote! { raw as f32 },
+        PostTransform::Logit => {
+            quote! { (1.0f64 / (1.0f64 + (-raw).exp())) as f32 }
+        }
+        PostTransform::Log => {
+            // Clamp before cast: exp() can exceed f32::MAX for large raw scores.
+            quote! { raw.exp().min(f32::MAX as f64) as f32 }
+        }
+        PostTransform::Softmax { .. } => unreachable!("softmax handled separately"),
+    }
+}
+
+/// Emit an f32 literal token. `quote!` panics on non-finite floats, and
+/// LightGBM thresholds can overflow to infinity when narrowed from f64.
+pub(crate) fn f32_token(v: f32) -> TokenStream {
+    if v.is_finite() {
+        quote! { #v }
+    } else if v.is_nan() {
+        quote! { f32::NAN }
+    } else if v > 0.0 {
+        quote! { f32::INFINITY }
+    } else {
+        quote! { f32::NEG_INFINITY }
+    }
+}
+
+/// Emit an f64 literal token; see [`f32_token`].
+pub(crate) fn f64_token(v: f64) -> TokenStream {
+    if v.is_finite() {
+        quote! { #v }
+    } else if v.is_nan() {
+        quote! { f64::NAN }
+    } else if v > 0.0 {
+        quote! { f64::INFINITY }
+    } else {
+        quote! { f64::NEG_INFINITY }
+    }
+}
+
 fn compile_node(node: &Node) -> TokenStream {
     match node {
-        Node::Leaf { value } => {
-            let v = *value;
-            quote! { #v }
-        }
+        Node::Leaf { value } => f64_token(*value),
 
         Node::Split {
             feature_idx,
@@ -488,7 +613,7 @@ fn compile_condition(split: &SplitKind, missing_direction: MissingDirection) -> 
                 operator,
             },
         ) => {
-            let th = *threshold;
+            let th = f32_token(*threshold);
             let cmp = match operator {
                 Operator::LessThan => quote! { val < #th },
                 Operator::LessOrEqual => quote! { val <= #th },
@@ -539,9 +664,12 @@ fn compile_oblivious_tree(
     splits: &[(usize, SplitKind, MissingDirection)],
     leaves: &[f64],
 ) -> TokenStream {
+    // Bit order must match `collect_leaves`, which stores leaves with the
+    // root split as the most significant bit (right-to-left within a level).
+    let n = splits.len();
     let mut index_expr = quote! { 0usize };
     for (i, (fi, split, md)) in splits.iter().enumerate() {
-        let bit = 1usize << i;
+        let bit = 1usize << (n - 1 - i);
         let cond = compile_condition(split, *md);
         index_expr = quote! {
             #index_expr | if { let val = features[#fi]; #cond } { #bit } else { 0 }
@@ -549,12 +677,13 @@ fn compile_oblivious_tree(
     }
 
     let n_leaves = leaves.len();
+    let leaf_tokens: Vec<TokenStream> = leaves.iter().map(|v| f64_token(*v)).collect();
     quote! {
         #[inline(always)]
         #[allow(unused_variables)]
         fn #fn_name(features: &[f32], ctrs: &[f64]) -> f64 {
             let index = #index_expr;
-            const LEAVES: [f64; #n_leaves] = [#(#leaves),*];
+            const LEAVES: [f64; #n_leaves] = [#(#leaf_tokens),*];
             LEAVES[index]
         }
     }

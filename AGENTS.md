@@ -117,9 +117,22 @@ pub enum MissingDirection {
 }
 ```
 
-### 3. Backend (`src/backends/rust.rs`)
+### 3. Backend (`src/backends/rust.rs`, `src/backends/rust_array.rs`)
 
-Generates standalone Rust code from IR:
+Two code layouts, selected via `--layout {auto,ifelse,array}` (default auto):
+
+- **if/else** (`rust.rs`): one nested if/else function per tree. Fastest at small
+  model sizes; source grows with every node.
+- **array** (`rust_array.rs`): the forest flattened into static parallel arrays
+  (`FEAT`/`THR`/`FLAGS`/`LEFT`/`RIGHT`/`LEAVES`/`ROOTS`/`WEIGHTS`) walked by a
+  loop. Keeps rustc compile time practical for very large forests (a 158k-node
+  model compiles in under a second vs 10+ minutes as if/else). Numeric splits
+  only; auto mode falls back to if/else for categorical/CTR models and switches
+  to array above `ARRAY_LAYOUT_NODE_THRESHOLD` (10k nodes). Both layouts produce
+  bit-identical predictions (enforced by differential tests that compile both
+  with rustc and compare outputs).
+
+The if/else backend generates standalone Rust code from IR:
 
 - Creates `pub struct Model;` with `pub fn predict(&self, features: &[f32]) -> f32`
 - Generates one `#[inline(always)] fn tree_N()` per tree
