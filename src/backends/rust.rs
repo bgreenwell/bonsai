@@ -1,5 +1,6 @@
 use crate::ir::{
-    AggregationKind, Forest, MissingDirection, Node, Operator, PostTransform, SplitKind,
+    AggregationKind, CatboostMetadata, Forest, MissingDirection, Node, Operator, PostTransform,
+    SplitKind,
 };
 use anyhow::Result;
 use proc_macro2::TokenStream;
@@ -9,6 +10,7 @@ use quote::{format_ident, quote};
 ///
 /// The output is a single module containing:
 /// - A `bitset_contains` helper (only if categorical splits are present)
+/// - CityHash + CTR helpers (only if CatBoost categorical features are present)
 /// - A `Model` unit struct
 /// - `Model::predict(&self, features: &[f32]) -> f32`
 /// - One `#[inline(always)]` tree function per tree in the forest
@@ -17,9 +19,8 @@ pub fn generate(forest: &Forest) -> Result<String> {
         anyhow::bail!("Cannot generate code for an empty forest (0 trees).");
     }
 
-    // --- Conditional: bitset helper (emitted once at module scope) ---
+    // --- Conditional: bitset helper ---
     let needs_bitset = forest.trees.iter().any(|t| has_categorical(&t.root));
-
     let bitset_helper = if needs_bitset {
         quote! {
             fn bitset_contains(bitoff: u16, nbits: u32, data: &[u8], idx: i32) -> bool {
@@ -36,6 +37,13 @@ pub fn generate(forest: &Forest) -> Result<String> {
         quote! {}
     };
 
+    // --- Conditional: CatBoost CTR helpers (computed once, used by both paths below) ---
+    let catboost_helpers = if let Some(meta) = &forest.catboost_metadata {
+        build_catboost_helpers(meta)?
+    } else {
+        quote! {}
+    };
+
     // --- Per-tree scoring functions ---
     let tree_fns: Vec<TokenStream> = forest
         .trees
@@ -43,17 +51,24 @@ pub fn generate(forest: &Forest) -> Result<String> {
         .enumerate()
         .map(|(i, tree)| {
             let fn_name = format_ident!("tree_{}", i);
-            let body = compile_node(&tree.root);
-            quote! {
-                #[inline(always)]
-                fn #fn_name(features: &[f32]) -> f64 {
-                    #body
+            if let Some(ob_splits) = tree.root.get_oblivious_splits() {
+                let mut leaves = Vec::new();
+                tree.root.collect_leaves(&mut leaves);
+                compile_oblivious_tree(&fn_name, &ob_splits, &leaves)
+            } else {
+                let body = compile_node(&tree.root);
+                quote! {
+                    #[inline(always)]
+                    #[allow(unused_variables)]
+                    fn #fn_name(features: &[f32], ctrs: &[f64]) -> f64 {
+                        #body
+                    }
                 }
             }
         })
         .collect();
 
-    // --- Softmax (multiclass) path: different aggregation and return type ---
+    // --- Softmax (multiclass) path ---
     if let PostTransform::Softmax { n_classes } = &forest.post_transform {
         let n_classes = *n_classes;
         anyhow::ensure!(
@@ -68,11 +83,17 @@ pub fn generate(forest: &Forest) -> Result<String> {
             n_classes
         );
 
-        let output = build_softmax_model(forest, n_classes, &bitset_helper, &tree_fns)?;
+        let output = build_softmax_model(
+            forest,
+            n_classes,
+            &bitset_helper,
+            &catboost_helpers,
+            &tree_fns,
+        )?;
         return Ok(output.to_string());
     }
 
-    // --- Aggregation expression (f64 throughout for precision) ---
+    // --- Scalar path ---
     let tree_calls: Vec<TokenStream> = forest
         .trees
         .iter()
@@ -80,7 +101,7 @@ pub fn generate(forest: &Forest) -> Result<String> {
         .map(|(i, tree)| {
             let fn_name = format_ident!("tree_{}", i);
             let w = tree.weight;
-            quote! { Self::#fn_name(features) * #w }
+            quote! { Self::#fn_name(features, ctrs) * #w }
         })
         .collect();
 
@@ -95,30 +116,58 @@ pub fn generate(forest: &Forest) -> Result<String> {
         }
     };
 
-    // --- Post-transform expression ---
     let post_transform_expr = match &forest.post_transform {
         PostTransform::Identity => quote! { raw as f32 },
         PostTransform::Logit => {
             quote! { (1.0f64 / (1.0f64 + (-raw).exp())) as f32 }
         }
         PostTransform::Log => {
-            // Clamp before cast: f64::exp can exceed f32::MAX for large raw scores
-            // (e.g. Poisson regression with large predictions), producing inf.
+            // Clamp before cast: exp() can exceed f32::MAX for large raw scores.
             quote! { raw.exp().min(f32::MAX as f64) as f32 }
         }
         PostTransform::Softmax { .. } => unreachable!("handled above"),
     };
 
-    // --- Assemble ---
+    let (predict_cat_method, internal_predict_call) = if forest.catboost_metadata.is_some() {
+        (
+            quote! {
+                pub fn predict_cat(&self, float_features: &[f32], cat_features: &[&str]) -> f32 {
+                    let ctrs = calculate_ctrs(float_features, cat_features);
+                    self.predict_internal(float_features, &ctrs)
+                }
+            },
+            quote! { self.predict_internal(features, &[]) },
+        )
+    } else {
+        (quote! {}, quote! { self.predict_internal(features, &[]) })
+    };
+
     let output = quote! {
         /// Auto-generated by bonsai.
         /// Do not edit manually.
         #bitset_helper
+        #[allow(unused_variables, dead_code, non_snake_case)]
+        #catboost_helpers
 
         pub struct Model;
 
+        #[allow(unused_variables, dead_code)]
         impl Model {
+            pub const N_CLASSES: usize = 1;
+
             pub fn predict(&self, features: &[f32]) -> f32 {
+                #internal_predict_call
+            }
+
+            #predict_cat_method
+
+            pub fn predict_batch(&self, features: &[f32], n_features: usize, out: &mut [f32]) {
+                for (i, row) in features.chunks_exact(n_features).enumerate() {
+                    out[i] = self.predict(row);
+                }
+            }
+
+            fn predict_internal(&self, features: &[f32], ctrs: &[f64]) -> f32 {
                 let raw: f64 = #aggregation_expr;
                 #post_transform_expr
             }
@@ -131,13 +180,266 @@ pub fn generate(forest: &Forest) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
+// CatBoost helpers codegen
+// ---------------------------------------------------------------------------
+
+/// Build the CityHash64 + CTR lookup helpers for CatBoost models.
+/// Called at most once per `generate()` invocation.
+fn build_catboost_helpers(meta: &CatboostMetadata) -> Result<TokenStream> {
+    let cityhash_logic = quote! {
+        const K0: u64 = 0xc3a5c85c97cb3127;
+        const K1: u64 = 0xb492b66fbe98f273;
+        const K2: u64 = 0x9ae16a3b2f90404f;
+        const K3: u64 = 0xc949d7c7509e6557;
+
+        #[inline(always)]
+        fn rotate(val: u64, shift: u32) -> u64 {
+            if shift == 0 { val } else { (val >> shift) | (val << (64 - shift)) }
+        }
+
+        #[inline(always)]
+        fn shift_mix(val: u64) -> u64 { val ^ (val >> 47) }
+
+        #[inline(always)]
+        fn hash_len16(u: u64, v: u64) -> u64 {
+            const K_MUL: u64 = 0x9ddfea08eb382d69;
+            let mut a = (u ^ v).wrapping_mul(K_MUL);
+            a ^= a >> 47;
+            let mut b = (v ^ a).wrapping_mul(K_MUL);
+            b ^= b >> 47;
+            b.wrapping_mul(K_MUL)
+        }
+
+        fn fetch64(s: &[u8], off: usize) -> u64 {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&s[off..off + 8]);
+            u64::from_le_bytes(b)
+        }
+
+        fn fetch32(s: &[u8], off: usize) -> u32 {
+            let mut b = [0u8; 4];
+            b.copy_from_slice(&s[off..off + 4]);
+            u32::from_le_bytes(b)
+        }
+
+        fn city_hash64_len0to16(s: &[u8]) -> u64 {
+            let len = s.len();
+            if len > 8 {
+                let a = fetch64(s, 0);
+                let b = fetch64(s, len - 8);
+                return hash_len16(a, rotate(b.wrapping_add(len as u64), len as u32).wrapping_add(b)) ^ b;
+            }
+            if len >= 4 {
+                let a = fetch32(s, 0) as u64;
+                let b = fetch32(s, len - 4) as u64;
+                return hash_len16((len as u64).wrapping_add(a << 3), b);
+            }
+            if len > 0 {
+                let a = s[0] as u32;
+                let b = s[len >> 1] as u32;
+                let c = s[len - 1] as u32;
+                let y = a.wrapping_add(b << 8);
+                let z = (len as u32).wrapping_add(c << 2);
+                return shift_mix((y as u64).wrapping_mul(K2) ^ (z as u64).wrapping_mul(K3)).wrapping_mul(K2);
+            }
+            K2
+        }
+
+        fn city_hash64_len17to32(s: &[u8]) -> u64 {
+            let len = s.len();
+            let a = fetch64(s, 0).wrapping_mul(K1);
+            let b = fetch64(s, 8);
+            let c = fetch64(s, len - 8).wrapping_mul(K2);
+            let d = fetch64(s, len - 16).wrapping_mul(K0);
+            hash_len16(
+                rotate(a.wrapping_sub(b), 43).wrapping_add(rotate(c, 30)).wrapping_add(d),
+                a.wrapping_add(rotate(b ^ K3, 20)).wrapping_sub(c).wrapping_add(len as u64),
+            )
+        }
+
+        fn city_hash64_len33to64(s: &[u8]) -> u64 {
+            let len = s.len();
+            let z = fetch64(s, 24);
+            let mut a = fetch64(s, 0).wrapping_add(
+                (len as u64).wrapping_add(fetch64(s, len - 16)).wrapping_mul(K0));
+            let mut b = rotate(a.wrapping_add(z), 52);
+            let mut c = rotate(a, 37);
+            a = a.wrapping_add(fetch64(s, 8));
+            c = c.wrapping_add(rotate(a, 7));
+            a = a.wrapping_add(fetch64(s, 16));
+            let vf = a.wrapping_add(z);
+            let vs = b.wrapping_add(rotate(a, 31)).wrapping_add(c);
+            a = fetch64(s, 16).wrapping_add(fetch64(s, 24));
+            let z2 = fetch64(s, len - 8);
+            a = rotate(a.wrapping_add(z2), 52);
+            b = rotate(a, 37);
+            a = a.wrapping_add(fetch64(s, len - 24));
+            b = b.wrapping_add(rotate(a, 11));
+            a = a.wrapping_add(fetch64(s, len - 32));
+            let wf = a.wrapping_add(z2);
+            let ws = b.wrapping_add(fetch64(s, len - 16));
+            let r = shift_mix(
+                vf.wrapping_add(ws).wrapping_mul(K2)
+                    .wrapping_add(wf.wrapping_add(vs).wrapping_mul(K0)));
+            shift_mix(r.wrapping_mul(K0).wrapping_add(vs)).wrapping_mul(K2)
+        }
+
+        fn weak_hash32(s: &[u8], off: usize, mut a: u64, mut b: u64) -> (u64, u64) {
+            let w = fetch64(s, off);
+            let x = fetch64(s, off + 8);
+            let y = fetch64(s, off + 16);
+            let z = fetch64(s, off + 24);
+            a = a.wrapping_add(w);
+            b = rotate(b.wrapping_add(a).wrapping_add(z), 21);
+            let c = a;
+            a = a.wrapping_add(x).wrapping_add(y);
+            b = b.wrapping_add(rotate(a, 44));
+            (a.wrapping_add(z), b.wrapping_add(c))
+        }
+
+        #[inline(always)]
+        fn city_hash64(s: &[u8]) -> u64 {
+            let len = s.len();
+            if len <= 16 { return city_hash64_len0to16(s); }
+            if len <= 32 { return city_hash64_len17to32(s); }
+            if len <= 64 { return city_hash64_len33to64(s); }
+            let mut x = fetch64(s, len - 40);
+            let mut y = fetch64(s, len - 16).wrapping_add(fetch64(s, len - 56));
+            let mut z = hash_len16(
+                fetch64(s, len - 48).wrapping_add(len as u64),
+                fetch64(s, len - 24));
+            let mut v = weak_hash32(s, len - 64, len as u64, z);
+            let mut w = weak_hash32(s, len - 32, y.wrapping_add(K1), x);
+            x = x.wrapping_mul(K1).wrapping_add(fetch64(s, 0));
+            let mut pos = 0usize;
+            let mut tail = (len - 1) & !63usize;
+            loop {
+                x = rotate(
+                    x.wrapping_add(y).wrapping_add(v.0).wrapping_add(fetch64(s, pos + 8)), 37)
+                    .wrapping_mul(K1);
+                y = rotate(y.wrapping_add(v.1).wrapping_add(fetch64(s, pos + 48)), 42)
+                    .wrapping_mul(K1);
+                x ^= w.1;
+                y = y.wrapping_add(v.0).wrapping_add(fetch64(s, pos + 40));
+                z = rotate(z.wrapping_add(w.0), 33).wrapping_mul(K1);
+                v = weak_hash32(s, pos, v.1.wrapping_mul(K1), x.wrapping_add(w.0));
+                w = weak_hash32(s, pos + 32, z.wrapping_add(w.1),
+                    y.wrapping_add(fetch64(s, pos + 16)));
+                let tmp = z; z = x; x = tmp;
+                pos += 64;
+                tail -= 64;
+                if tail == 0 { break; }
+            }
+            hash_len16(
+                hash_len16(v.0, w.0).wrapping_add(shift_mix(y).wrapping_mul(K1)).wrapping_add(z),
+                hash_len16(v.1, w.1).wrapping_add(x))
+        }
+
+        #[inline(always)]
+        fn catboost_calc_hash(a: u64, b: u64) -> u64 {
+            const MAGIC_MULT: u64 = 0x4906ba494954cb65;
+            MAGIC_MULT.wrapping_mul(a.wrapping_add(MAGIC_MULT.wrapping_mul(b)))
+        }
+    };
+
+    let mut ctr_tables = Vec::new();
+    let mut ctr_elem_cat_indices = Vec::new();
+
+    for ctr in &meta.ctrs {
+        let table = meta.ctr_data.get(&ctr.identifier).ok_or_else(|| {
+            anyhow::anyhow!("Missing CTR data for identifier: {}", ctr.identifier)
+        })?;
+        let hash_map = &table.hash_map;
+        let stride = table.hash_stride;
+        let denom = table.counter_denominator;
+        let p_num = ctr.prior_numerator;
+        let p_denom = ctr.prior_denominator;
+        let shift = ctr.shift;
+        let scale = ctr.scale;
+
+        let mut elem_cat_indices = Vec::new();
+        for elem in &ctr.elements {
+            if elem.combination_element == "cat_feature_value" {
+                elem_cat_indices.push(elem.cat_feature_index);
+            }
+        }
+        ctr_elem_cat_indices.push(elem_cat_indices);
+
+        ctr_tables.push(quote! {
+            {
+                let hash_map: &[u64] = &[#(#hash_map),*];
+                let stride = #stride;
+                let mut low = 0;
+                let mut high = hash_map.len() / stride;
+                let mut found_idx = None;
+                while low < high {
+                    let mid = low + (high - low) / 2;
+                    let h = hash_map[mid * stride];
+                    if h < combined_hash {
+                        low = mid + 1;
+                    } else if h > combined_hash {
+                        high = mid;
+                    } else {
+                        found_idx = Some(mid);
+                        break;
+                    }
+                }
+
+                let (count_in_class, total_count) = if let Some(idx) = found_idx {
+                    let base = idx * stride;
+                    if stride == 3 {
+                        (hash_map[base + 2] as f64, (hash_map[base + 1] + hash_map[base + 2]) as f64)
+                    } else {
+                        (0.0, #denom as f64)
+                    }
+                } else {
+                    (0.0, #denom as f64)
+                };
+
+                let ctr_val = (count_in_class + #p_num) / (total_count + #p_denom);
+                (ctr_val + #shift) * #scale
+            }
+        });
+    }
+
+    let ctr_calls: Vec<TokenStream> = ctr_tables
+        .iter()
+        .zip(ctr_elem_cat_indices.iter())
+        .map(|(table_code, elem_indices)| {
+            quote! {
+                {
+                    let mut combined_hash = 0u64;
+                    #(
+                        {
+                            let cat_idx = #elem_indices;
+                            let cat_val = cat_features[cat_idx];
+                            let h32 = city_hash64(cat_val.as_bytes()) as u32;
+                            combined_hash = catboost_calc_hash(combined_hash, (h32 as i32) as i64 as u64);
+                        }
+                    )*
+                    #table_code
+                }
+            }
+        })
+        .collect();
+
+    Ok(quote! {
+        #cityhash_logic
+
+        #[allow(unused_variables, dead_code)]
+        fn calculate_ctrs(float_features: &[f32], cat_features: &[&str]) -> Vec<f64> {
+            vec![
+                #(#ctr_calls),*
+            ]
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Node compilation
 // ---------------------------------------------------------------------------
 
 /// Recursively compile an IR node into a token stream of nested if/else blocks.
-///
-/// Convention: left_child is taken when the split condition is TRUE.
-/// NaN routing is folded into the condition based on MissingDirection.
 fn compile_node(node: &Node) -> TokenStream {
     match node {
         Node::Leaf { value } => {
@@ -155,77 +457,9 @@ fn compile_node(node: &Node) -> TokenStream {
             let fi = *feature_idx;
             let left_code = compile_node(left_child);
             let right_code = compile_node(right_child);
+            let left_cond = compile_condition(split, *missing_direction);
 
-            // Build the "go left" condition, incorporating NaN routing.
-            //
-            // MissingDirection::Left  → NaN goes left  → left_cond = is_nan  OR  cmp
-            // MissingDirection::Right → NaN goes right → left_cond = !is_nan AND cmp
-            // NaVsRest: splits solely on NaN-ness, NaN goes right
-            let left_cond = match (missing_direction, split) {
-                // NaVsRest nodes split only on NaN, threshold is unused (set to NAN)
-                (MissingDirection::NaVsRest, _) => {
-                    quote! { !val.is_nan() }
-                }
-
-                (
-                    _,
-                    SplitKind::Numeric {
-                        threshold,
-                        operator,
-                    },
-                ) => {
-                    let th = *threshold;
-                    let cmp = match operator {
-                        Operator::LessThan => quote! { val < #th },
-                        Operator::LessOrEqual => quote! { val <= #th },
-                        Operator::GreaterThan => quote! { val > #th },
-                        Operator::GreaterOrEqual => quote! { val >= #th },
-                        Operator::Equal => quote! { val == #th },
-                        Operator::NotEqual => quote! { val != #th },
-                    };
-
-                    match missing_direction {
-                        MissingDirection::Left => {
-                            quote! { val.is_nan() || (#cmp) }
-                        }
-                        _ => {
-                            // Right, None
-                            quote! { !val.is_nan() && (#cmp) }
-                        }
-                    }
-                }
-
-                (
-                    _,
-                    SplitKind::Categorical {
-                        bitoff,
-                        nbits,
-                        data,
-                    },
-                ) => {
-                    let bo = *bitoff;
-                    let nb = *nbits;
-                    let bytes = data.clone();
-
-                    let membership = quote! {
-                        bitset_contains(#bo, #nb, &[#(#bytes),*], val as i32)
-                    };
-
-                    // In H2O MOJO: if value is IN bitset → RIGHT child, NOT IN bitset → LEFT child
-                    // So we negate the membership test for the left condition
-                    match missing_direction {
-                        MissingDirection::Left => {
-                            quote! { val.is_nan() || !#membership }
-                        }
-                        _ => {
-                            quote! { !val.is_nan() && !#membership }
-                        }
-                    }
-                }
-            };
-
-            // Wrap in a block so that `val` bindings at different tree depths
-            // each live in their own scope and shadow cleanly.
+            // Each depth lives in its own block so `val` bindings shadow cleanly.
             quote! {
                 {
                     let val = features[#fi];
@@ -240,22 +474,103 @@ fn compile_node(node: &Node) -> TokenStream {
     }
 }
 
+fn compile_condition(split: &SplitKind, missing_direction: MissingDirection) -> TokenStream {
+    match (missing_direction, split) {
+        // NaVsRest splits solely on NaN-ness; the threshold value is unused.
+        (MissingDirection::NaVsRest, _) => {
+            quote! { !val.is_nan() }
+        }
+
+        (
+            _,
+            SplitKind::Numeric {
+                threshold,
+                operator,
+            },
+        ) => {
+            let th = *threshold;
+            let cmp = match operator {
+                Operator::LessThan => quote! { val < #th },
+                Operator::LessOrEqual => quote! { val <= #th },
+                Operator::GreaterThan => quote! { val > #th },
+                Operator::GreaterOrEqual => quote! { val >= #th },
+                Operator::Equal => quote! { val == #th },
+                Operator::NotEqual => quote! { val != #th },
+            };
+
+            match missing_direction {
+                MissingDirection::Left => quote! { val.is_nan() || (#cmp) },
+                _ => quote! { !val.is_nan() && (#cmp) },
+            }
+        }
+
+        (
+            _,
+            SplitKind::Categorical {
+                bitoff,
+                nbits,
+                data,
+            },
+        ) => {
+            let bo = *bitoff;
+            let nb = *nbits;
+            let bytes = data.clone();
+
+            let membership = quote! {
+                bitset_contains(#bo, #nb, &[#(#bytes),*], val as i32)
+            };
+
+            // H2O MOJO: value IN bitset → RIGHT child, NOT IN → LEFT child.
+            match missing_direction {
+                MissingDirection::Left => quote! { val.is_nan() || !#membership },
+                _ => quote! { !val.is_nan() && !#membership },
+            }
+        }
+
+        (_, SplitKind::OnlineCtr { ctr_idx, threshold }) => {
+            let th = *threshold;
+            quote! { ctrs[#ctr_idx] >= (#th as f64) }
+        }
+    }
+}
+
+fn compile_oblivious_tree(
+    fn_name: &proc_macro2::Ident,
+    splits: &[(usize, SplitKind, MissingDirection)],
+    leaves: &[f64],
+) -> TokenStream {
+    let mut index_expr = quote! { 0usize };
+    for (i, (fi, split, md)) in splits.iter().enumerate() {
+        let bit = 1usize << i;
+        let cond = compile_condition(split, *md);
+        index_expr = quote! {
+            #index_expr | if { let val = features[#fi]; #cond } { #bit } else { 0 }
+        };
+    }
+
+    let n_leaves = leaves.len();
+    quote! {
+        #[inline(always)]
+        #[allow(unused_variables)]
+        fn #fn_name(features: &[f32], ctrs: &[f64]) -> f64 {
+            let index = #index_expr;
+            const LEAVES: [f64; #n_leaves] = [#(#leaves),*];
+            LEAVES[index]
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Softmax (multiclass) codegen
 // ---------------------------------------------------------------------------
 
-/// Generate the Model struct for a multiclass softmax forest.
-///
-/// Trees are assigned round-robin to classes: tree i → class (i % n_classes).
-/// The predict_proba method returns a Vec<f32> of length n_classes.
 fn build_softmax_model(
     forest: &Forest,
     n_classes: usize,
     bitset_helper: &TokenStream,
+    catboost_helpers: &TokenStream,
     tree_fns: &[TokenStream],
 ) -> Result<TokenStream> {
-    // Build per-class raw score expressions.
-    // Per-class base scores take precedence over the scalar base_score (XGBoost multiclass).
     let raw_decls: Vec<TokenStream> = (0..n_classes)
         .map(|c| {
             let raw_var = format_ident!("raw_{}", c);
@@ -265,7 +580,6 @@ fn build_softmax_model(
                 forest.base_score
             };
 
-            // Trees for class c: indices c, c+n_classes, c+2*n_classes, ...
             let terms: Vec<TokenStream> = forest
                 .trees
                 .iter()
@@ -274,7 +588,7 @@ fn build_softmax_model(
                 .map(|(i, tree)| {
                     let fn_name = format_ident!("tree_{}", i);
                     let w = tree.weight;
-                    quote! { Self::#fn_name(features) * #w }
+                    quote! { Self::#fn_name(features, ctrs) * #w }
                 })
                 .collect();
 
@@ -290,16 +604,14 @@ fn build_softmax_model(
         })
         .collect();
 
-    // max_raw for numerical stability
     let raw_vars: Vec<_> = (0..n_classes).map(|c| format_ident!("raw_{}", c)).collect();
-    let first = &raw_vars[0]; // safe: n_classes >= 2 is enforced above
+    let first = &raw_vars[0];
     let max_expr = raw_vars
         .iter()
         .skip(1)
         .fold(quote! { #first }, |acc, v| quote! { #acc.max(#v) });
     let max_decl = quote! { let max_raw: f64 = #max_expr; };
 
-    // exp terms
     let exp_vars: Vec<_> = (0..n_classes).map(|c| format_ident!("e_{}", c)).collect();
     let exp_decls: Vec<TokenStream> = raw_vars
         .iter()
@@ -307,24 +619,54 @@ fn build_softmax_model(
         .map(|(r, e)| quote! { let #e: f64 = (#r - max_raw).exp(); })
         .collect();
 
-    // sum of exps
     let sum_decl = quote! { let sum_e: f64 = #(#exp_vars)+*; };
 
-    // Output vec
     let prob_items: Vec<TokenStream> = exp_vars
         .iter()
         .map(|e| quote! { (#e / sum_e) as f32 })
         .collect();
 
+    let predict_cat_proba_method = if forest.catboost_metadata.is_some() {
+        quote! {
+            pub fn predict_cat_proba(&self, float_features: &[f32], cat_features: &[&str]) -> Vec<f32> {
+                let ctrs = calculate_ctrs(float_features, cat_features);
+                self.predict_proba_internal(float_features, &ctrs)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         /// Auto-generated by bonsai.
         /// Do not edit manually.
         #bitset_helper
+        #[allow(unused_variables, dead_code, non_snake_case)]
+        #catboost_helpers
 
         pub struct Model;
 
+        #[allow(unused_variables, dead_code)]
         impl Model {
+            pub const N_CLASSES: usize = #n_classes;
+
             pub fn predict_proba(&self, features: &[f32]) -> Vec<f32> {
+                self.predict_proba_internal(features, &[])
+            }
+
+            #predict_cat_proba_method
+
+            pub fn predict_batch(&self, features: &[f32], n_features: usize, out: &mut [f32]) {
+                let n_classes = #n_classes;
+                for (i, row) in features.chunks_exact(n_features).enumerate() {
+                    let probs = self.predict_proba(row);
+                    for (j, prob) in probs.into_iter().enumerate() {
+                        out[i * n_classes + j] = prob;
+                    }
+                }
+            }
+
+            fn predict_proba_internal(&self, features: &[f32], ctrs: &[f64]) -> Vec<f32> {
                 #(#raw_decls)*
                 #max_decl
                 #(#exp_decls)*
@@ -381,6 +723,32 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_oblivious_tree() {
+        let split_kind = SplitKind::Numeric {
+            threshold: 0.5,
+            operator: Operator::GreaterThan,
+        };
+        let root = Node::Split {
+            feature_idx: 0,
+            split: split_kind.clone(),
+            left_child: Box::new(Node::Leaf { value: 1.0 }),
+            right_child: Box::new(Node::Leaf { value: 0.0 }),
+            missing_direction: MissingDirection::None,
+        };
+        let forest = Forest {
+            trees: vec![Tree { root, weight: 1.0 }],
+            base_score: 0.0,
+            base_scores: vec![],
+            aggregation: AggregationKind::Sum,
+            post_transform: PostTransform::Identity,
+            catboost_metadata: None,
+        };
+        let code = generate(&forest).unwrap();
+        assert!(code.contains("let index = 0usize | if"));
+        assert!(code.contains("const LEAVES : [f64 ; 2usize] = [0f64 , 1f64]"));
+    }
+
+    #[test]
     fn test_generate_regression_identity() {
         let forest = Forest {
             trees: vec![make_tree(simple_split(0, 0.5, leaf(1.0), leaf(-1.0)))],
@@ -388,9 +756,11 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
         let code = generate(&forest).unwrap();
         assert!(code.contains("pub fn predict"));
+        assert!(code.contains("pub fn predict_batch"));
         assert!(code.contains("raw as f32"));
         assert!(!code.contains("predict_proba"));
     }
@@ -403,9 +773,11 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Logit,
+            catboost_metadata: None,
         };
         let code = generate(&forest).unwrap();
         assert!(code.contains("pub fn predict"));
+        assert!(code.contains("pub fn predict_batch"));
         assert!(code.contains("exp"));
         assert!(!code.contains("predict_proba"));
     }
@@ -420,12 +792,17 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Softmax { n_classes: 3 },
+            catboost_metadata: None,
         };
         let code = generate(&forest).unwrap();
 
         assert!(
             code.contains("predict_proba"),
             "should generate predict_proba"
+        );
+        assert!(
+            code.contains("predict_batch"),
+            "should generate predict_batch"
         );
         assert!(
             !code.contains("pub fn predict("),
@@ -440,21 +817,16 @@ mod tests {
             "should include numerical stability max"
         );
         assert!(code.contains("sum_e"), "should include softmax denominator");
-        // tree_0 and tree_3 both go to class 0
         assert!(code.contains("raw_0"), "class 0 raw score");
         assert!(code.contains("raw_1"), "class 1 raw score");
         assert!(code.contains("raw_2"), "class 2 raw score");
 
-        // Verify max_raw starts with a single ident, not a sequence of all raw_N vars.
-        // Bad: "let max_raw : f64 = raw_0 raw_1 raw_2 . max..."
-        // Good: "let max_raw : f64 = raw_0 . max ( raw_1 ) . max ( raw_2 ) ;"
         let max_raw_decl_idx = code.find("let max_raw").expect("max_raw decl not found");
         let after_max = &code[max_raw_decl_idx..];
         assert!(
             after_max.contains(". max"),
             "max_raw should use .max() chaining"
         );
-        // "raw_0 raw_1" would mean two tokens without a dot — check it's not present right after =
         let eq_pos = after_max.find('=').expect("= not found in max_raw decl");
         let after_eq = after_max[eq_pos + 1..].trim_start();
         assert!(
@@ -466,7 +838,6 @@ mod tests {
 
     #[test]
     fn test_generate_softmax_rejects_odd_tree_count() {
-        // 5 trees can't be divided into 3 classes
         let trees: Vec<Tree> = (0..5).map(|_| make_tree(leaf(0.0))).collect();
         let forest = Forest {
             trees,
@@ -474,6 +845,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Softmax { n_classes: 3 },
+            catboost_metadata: None,
         };
         assert!(
             generate(&forest).is_err(),
@@ -489,6 +861,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
         let code = generate(&forest).unwrap();
         assert!(!code.contains("bitset_contains"));

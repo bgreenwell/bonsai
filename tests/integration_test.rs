@@ -357,15 +357,18 @@ fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
     let status = Command::new(bonsai_bin)
         .args([
             "transpile",
-            "--input", model_json.to_str().unwrap(),
-            "--output", output_path.to_str().unwrap(),
+            "--input",
+            model_json.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
         ])
         .status()
         .expect("Failed to run bonsai binary");
     assert!(status.success(), "bonsai transpilation failed");
 
     // 2. Verify generated code uses predict_proba + bitset_contains only if needed
-    let generated_code = fs::read_to_string(&output_path).expect("Failed to read generated model.rs");
+    let generated_code =
+        fs::read_to_string(&output_path).expect("Failed to read generated model.rs");
     assert!(
         generated_code.contains("predict_proba"),
         "Multiclass model should generate predict_proba"
@@ -385,7 +388,8 @@ fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
         .expect("metadata.json missing n_classes") as usize;
 
     // 4. Parse test_data.csv
-    let csv_content = fs::read_to_string(&test_data_path).expect("generated/test_data.csv not found");
+    let csv_content =
+        fs::read_to_string(&test_data_path).expect("generated/test_data.csv not found");
     let mut csv_lines = csv_content.lines();
     let header: Vec<&str> = csv_lines
         .next()
@@ -444,7 +448,10 @@ fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
         ground_truth.push(gt);
     }
 
-    assert!(!feature_rows.is_empty(), "No data rows found in test_data.csv");
+    assert!(
+        !feature_rows.is_empty(),
+        "No data rows found in test_data.csv"
+    );
 
     // 5. Compile and run with multiclass harness
     let predictions = compile_and_run_multiclass_model(&output_path, n_features, &feature_rows);
@@ -455,8 +462,12 @@ fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
     let mut mismatches = 0usize;
     for (i, (pred_row, gt_row)) in predictions.iter().zip(ground_truth.iter()).enumerate() {
         assert_eq!(
-            pred_row.len(), n_classes,
-            "Row {}: expected {} class probs, got {}", i, n_classes, pred_row.len()
+            pred_row.len(),
+            n_classes,
+            "Row {}: expected {} class probs, got {}",
+            i,
+            n_classes,
+            pred_row.len()
         );
         for (c, (pred, gt)) in pred_row.iter().zip(gt_row.iter()).enumerate() {
             let error = (pred - gt).abs();
@@ -479,7 +490,10 @@ fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
 
     println!(
         "✓ {}: all {} rows × {} classes match within {}",
-        test_dir, predictions.len(), n_classes, tolerance
+        test_dir,
+        predictions.len(),
+        n_classes,
+        tolerance
     );
 }
 
@@ -535,6 +549,138 @@ fn test_sklearn_onnx_regression_numeric() {
 fn test_sklearn_onnx_regression_categorical() {
     // sklearn ONNX label-encodes categoricals to numeric — no bitset helper expected
     run_test_case("sklearn_onnx/regression_categorical", false);
+}
+
+// ---------------------------------------------------------------------------
+// CatBoost JSON tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_catboost_regression_numeric() {
+    run_test_case("catboost/regression", false);
+}
+
+#[test]
+#[ignore]
+fn test_catboost_regression_categorical() {
+    run_catboost_cat_test_case("catboost/regression_categorical");
+}
+
+#[test]
+#[ignore]
+fn test_catboost_classification_multiclass() {
+    run_multiclass_test_case("catboost/multiclass");
+}
+
+fn run_catboost_cat_test_case(test_dir: &str) {
+    let test_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/tests")
+        .join(test_dir);
+
+    let model_json = test_path.join("generated/model.json");
+    let output_path = test_path.join("generated/model.rs");
+    let test_data_path = test_path.join("generated/test_data.csv");
+
+    // 1. Transpile
+    let bonsai_bin = env!("CARGO_BIN_EXE_bonsai");
+    let status = Command::new(bonsai_bin)
+        .args([
+            "transpile",
+            "--input",
+            model_json.to_str().unwrap(),
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("Failed to run bonsai binary");
+    assert!(status.success(), "bonsai transpilation failed");
+
+    // 2. Load data
+    let csv_content = fs::read_to_string(&test_data_path).expect("test_data.csv not found");
+    let mut lines = csv_content.lines();
+    let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+
+    let feature_0_idx = header.iter().position(|&h| h == "feature_0").unwrap();
+    let cat_feature_idx = header.iter().position(|&h| h == "cat_feature").unwrap();
+    let gt_idx = header.iter().position(|&h| h == "ground_truth").unwrap();
+
+    let mut float_features = Vec::new();
+    let mut cat_features = Vec::new();
+    let mut ground_truth = Vec::new();
+
+    for line in lines {
+        let parts: Vec<&str> = line.split(',').collect();
+        float_features.push(vec![parts[feature_0_idx].parse::<f32>().unwrap()]);
+        cat_features.push(parts[cat_feature_idx].to_string());
+        ground_truth.push(parts[gt_idx].parse::<f32>().unwrap());
+    }
+
+    // 3. Score via temporary harness
+    let mut harness = String::from(
+        "
+        #[path = \"model.rs\"]
+        mod model_generated;
+        use model_generated::Model;
+        fn main() {
+            let model = Model;
+    ",
+    );
+
+    for (f, c) in float_features.iter().zip(cat_features.iter()) {
+        harness.push_str(&format!(
+            "println!(\"{{}}\", model.predict_cat(&{:?}, &[{:?}]));\n",
+            f, c
+        ));
+    }
+    harness.push('}');
+
+    let harness_path = test_path.join("generated/harness_cat.rs");
+    fs::write(&harness_path, harness).unwrap();
+
+    let exe_path = test_path.join("generated/harness_cat");
+    let compile_status = Command::new("rustc")
+        .args([
+            harness_path.to_str().unwrap(),
+            "-o",
+            exe_path.to_str().unwrap(),
+            "--edition",
+            "2021",
+        ])
+        .status()
+        .expect("Failed to compile harness");
+    assert!(compile_status.success(), "harness compilation failed");
+
+    let output = Command::new(&exe_path)
+        .output()
+        .expect("Failed to run harness");
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let predictions: Vec<f32> = stdout_str
+        .lines()
+        .filter_map(|l| l.parse::<f32>().ok())
+        .collect();
+
+    if !output.status.success() || predictions.len() != ground_truth.len() {
+        println!("Harness STDOUT:\n{}", stdout_str);
+        println!(
+            "Harness STDERR:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for (i, (pred, gt)) in predictions.iter().zip(ground_truth.iter()).enumerate() {
+        if (pred - gt).abs() >= 1e-5 {
+            println!("Harness STDOUT on mismatch:\n{}", stdout_str);
+            assert!(
+                (pred - gt).abs() < 1e-5,
+                "Prediction mismatch at row {}: got {}, expected {}",
+                i,
+                pred,
+                gt
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

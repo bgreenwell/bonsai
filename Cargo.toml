@@ -2,34 +2,40 @@
 name = "bonsai"
 version = "0.1.0"
 edition = "2021"
+authors = ["Brandon Greenwell <greenwell.brandon@gmail.com>"]
+description = "A tree ensemble model transpiler (XGBoost, LightGBM, CatBoost) to standalone Rust."
+license = "MIT"
 default-run = "bonsai"
+keywords = ["machine-learning", "xgboost", "lightgbm", "catboost", "transpiler"]
+categories = ["science", "development-tools"]
+repository = "https://github.com/bgreenwell/bonsai"
+homepage = "https://github.com/bgreenwell/bonsai"
+readme = "README.md"
 
 [dependencies]
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 
 # Error handling
-anyhow = "1"
-thiserror = "1"
+anyhow = "1.0"
 
 # ONNX protobuf runtime
 prost = "0.12"
-prost-types = "0.12"
 
 # Code generation
-quote = "1"
-proc-macro2 = "1"
+quote = "1.0"
+proc-macro2 = "1.0"
 
 # MOJO archive + binary parsing
 zip = "0.6"
-byteorder = "1"
+byteorder = "1.5"
 
-# JSON model formats (XGBoost, LightGBM)
-serde_json = "1"
+# JSON model formats (XGBoost, LightGBM, CatBoost)
+serde_json = "1.0"
 
 # Scorer — optional, heavy
 polars = { version = "0.37", features = ["lazy", "parquet", "csv"], optional = true }
-rayon  = { version = "1",    optional = true }
+rayon  = { version = "1.10",    optional = true }
 
 [features]
 default = []
@@ -60,3 +66,7 @@ path = "src/main.rs"
 name = "polars_score"
 path = "src/bin/polars_score.rs"
 required-features = ["scorer"]
+
+[profile.release]
+lto = true
+codegen-units = 1

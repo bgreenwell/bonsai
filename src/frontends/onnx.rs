@@ -279,6 +279,7 @@ impl super::Frontend for OnnxFrontend {
             base_scores: vec![],
             aggregation,
             post_transform,
+            catboost_metadata: None,
         })
     }
 }
