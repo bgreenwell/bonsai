@@ -37,6 +37,11 @@ enum Commands {
         /// Path for the generated Rust source file
         #[arg(short, long, value_name = "FILE", default_value = "model_generated.rs")]
         output: PathBuf,
+
+        /// Code layout: auto picks arrays for large numeric-only forests,
+        /// nested if/else otherwise
+        #[arg(long, value_enum, default_value_t = LayoutArg::Auto)]
+        layout: LayoutArg,
     },
 
     /// Inspect a model's structure and metadata
@@ -55,11 +60,33 @@ enum Commands {
     },
 }
 
+/// CLI mirror of `backends::rust::Layout` so the backend stays clap-free.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LayoutArg {
+    Auto,
+    Ifelse,
+    Array,
+}
+
+impl From<LayoutArg> for backends::rust::Layout {
+    fn from(arg: LayoutArg) -> Self {
+        match arg {
+            LayoutArg::Auto => backends::rust::Layout::Auto,
+            LayoutArg::Ifelse => backends::rust::Layout::IfElse,
+            LayoutArg::Array => backends::rust::Layout::Array,
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Transpile { input, output } => transpile_command(input, output),
+        Commands::Transpile {
+            input,
+            output,
+            layout,
+        } => transpile_command(input, output, layout.into()),
         Commands::Inspect {
             input,
             trees,
@@ -68,14 +95,20 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn transpile_command(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
+fn transpile_command(
+    input: PathBuf,
+    output: PathBuf,
+    layout: backends::rust::Layout,
+) -> anyhow::Result<()> {
     println!("🌱 bonsai: converting {:?}", input);
 
     let forest = parse_model(&input)?;
     println!("   > {} trees in forest", forest.trees.len());
 
     // --- Generate Rust source ---
-    let rust_code = backends::rust::generate(&forest)?;
+    let resolved = backends::rust::resolve_layout(&forest, layout)?;
+    println!("   > code layout: {:?}", resolved);
+    let rust_code = backends::rust::generate_with_layout(&forest, resolved)?;
     println!("   > generated {} bytes of Rust source", rust_code.len());
 
     // --- Write output ---

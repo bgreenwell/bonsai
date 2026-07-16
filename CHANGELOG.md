@@ -15,3 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - High-throughput Batch API (`predict_batch`).
 - Parallel batch scoring CLI (`polars_score`) with multiclass support.
 - Model inspection and structural analysis tool (`bonsai inspect`).
+- Array code layout (`--layout`) for large forests, auto-selected above 10k nodes.
+
+### Fixed
+- Oblivious-tree fast path returned depth-reversed leaves for trees deeper than one level.
+- Transpiler panicked on non-finite split thresholds and leaf values.
