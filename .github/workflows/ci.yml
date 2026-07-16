@@ -61,3 +61,43 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integration-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install model-training dependencies
+        run: >
+          pip install numpy pandas scikit-learn xgboost lightgbm catboost
+          skl2onnx onnx
+
+      - name: Generate model fixtures
+        run: >
+          python scripts/generate_all_fixtures.py
+          xgboost lightgbm catboost sklearn_onnx
+
+      # H2O MOJO tests are skipped: fixture generation needs a Java runtime
+      # and an H2O cluster.
+      - name: Run integration tests
+        run: cargo test --test integration_test -- --ignored --skip test_h2o

@@ -1,7 +1,18 @@
-import os
+"""Run every assets/tests/**/generate.py, optionally filtered by framework.
+
+Usage:
+    python scripts/generate_all_fixtures.py [framework ...]
+
+With no arguments all generation scripts run. Passing framework directory
+names (e.g. `xgboost lightgbm catboost sklearn_onnx`) restricts the run to
+those subdirectories of assets/tests. A script failure does not stop the
+run, but the exit code is non-zero if any script failed.
+"""
+
 import subprocess
 import sys
 from pathlib import Path
+
 
 def main():
     base_dir = Path("assets/tests")
@@ -9,35 +20,42 @@ def main():
         print(f"Error: {base_dir} not found. Run from project root.")
         sys.exit(1)
 
-    scripts = list(base_dir.glob("**/generate.py"))
-    scripts.sort()
+    frameworks = set(sys.argv[1:])
+    scripts = sorted(base_dir.glob("**/generate.py"))
+    if frameworks:
+        scripts = [s for s in scripts if s.relative_to(base_dir).parts[0] in frameworks]
 
     if not scripts:
         print("No generate.py scripts found.")
-        return
+        sys.exit(1)
 
     print(f"Found {len(scripts)} generation scripts.")
 
+    failures = []
     for script in scripts:
         print("-" * 60)
         print(f"Running: {script}")
-        
         try:
-            # Run the script in its own directory
             subprocess.run(
                 [sys.executable, "generate.py"],
                 cwd=script.parent,
-                check=True
+                check=True,
             )
         except subprocess.CalledProcessError as e:
             print(f"Error running {script}: {e}")
-            # We continue with other scripts even if one fails
-            # or we could exit(1) if we want it to be strict
+            failures.append(script)
         except Exception as e:
             print(f"Unexpected error: {e}")
+            failures.append(script)
 
     print("-" * 60)
+    if failures:
+        print(f"{len(failures)} script(s) failed:")
+        for f in failures:
+            print(f"  {f}")
+        sys.exit(1)
     print("Finished processing all generation scripts.")
+
 
 if __name__ == "__main__":
     main()

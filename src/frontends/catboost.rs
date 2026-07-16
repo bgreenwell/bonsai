@@ -17,9 +17,13 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
         classes_count = 1;
     }
 
+    // Loss function location varies by CatBoost version: older exports use
+    // model_info.loss_function, newer ones model_info.params.loss_function.
     let loss_function = model_info["loss_function"]["type"]
         .as_str()
         .or_else(|| model_info["loss_function"].as_str())
+        .or_else(|| model_info["params"]["loss_function"]["type"].as_str())
+        .or_else(|| model_info["params"]["loss_function"].as_str())
         .unwrap_or("RMSE");
 
     println!("   > loss function: {}", loss_function);
@@ -242,12 +246,14 @@ fn parse_oblivious_tree(tv: &Value, classes_count: usize) -> Result<Vec<Tree>> {
         );
     }
 
+    // Multiclass leaf_values are leaf-major: [leaf0_class0, leaf0_class1, ...,
+    // leaf1_class0, ...]. Verified against CatBoost's RawFormulaVal output.
     let mut trees = Vec::with_capacity(classes_count);
     for c in 0..classes_count {
-        let start = c * n_leaves_per_class;
-        let end = (c + 1) * n_leaves_per_class;
-        let class_leaf_values = &leaf_values[start..end];
-        let root = build_oblivious_node(&splits, class_leaf_values);
+        let class_leaf_values: Vec<f64> = (0..n_leaves_per_class)
+            .map(|leaf| leaf_values[leaf * classes_count + c])
+            .collect();
+        let root = build_oblivious_node(&splits, &class_leaf_values);
         trees.push(Tree { root, weight: 1.0 });
     }
 
