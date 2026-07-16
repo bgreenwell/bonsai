@@ -1,10 +1,12 @@
 # AGENTS.md
 
+@../CLAUDE.md
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-**bonsai** is a tree ensemble model transpiler that converts trained ML models (Random Forests, GBMs) from H2O-3 and ONNX into standalone, zero-dependency Rust code for ultra-low latency inference.
+**bonsai** is a tree ensemble model transpiler that converts trained ML models (Random Forests, GBMs) from XGBoost, LightGBM, CatBoost, H2O-3 MOJO, and ONNX into standalone, zero-dependency Rust code for low-latency inference.
 
 **Key principle:** Train in Python/R/Java. Deploy as pure Rust.
 
@@ -65,7 +67,13 @@ Parse format-specific models into a universal intermediate representation:
   - Handles recursive tree structure and various objective types
   - Builds `ir::Forest`
 
-**File extension detection in `main.rs`:** `.zip` → MOJO, `.onnx`/`.pb` → ONNX, `.json` → XGBoost/LightGBM (auto-detected via JSON keys)
+- **`catboost.rs`**: CatBoost format (.json)
+  - Parses JSON model saved via `model.save_model(path, format="json")` (top-level `oblivious_trees` key)
+  - Expands oblivious (symmetric) trees into IR trees; backend detects symmetry and emits a branchless fast path
+  - Parses CTR metadata (`features_info.ctrs`) and CTR value tables (`ctr_data`) for native categorical features; generated code hashes categories with CityHash64 and looks up CTR values via binary search
+  - Builds `ir::Forest` with `catboost_metadata` attached when categoricals are present
+
+**File extension detection in `main.rs`:** `.zip` → MOJO, `.onnx`/`.pb` → ONNX, `.json` → XGBoost/LightGBM/CatBoost (auto-detected via JSON keys; CatBoost via `oblivious_trees`)
 
 ### 2. Intermediate Representation (`src/ir.rs`)
 
@@ -169,8 +177,9 @@ Generates standalone Rust code from IR:
 
 ### Integration Tests
 - Located in `tests/integration_test.rs` and `assets/tests/`
-- Cover 15 scenarios across XGBoost, LightGBM, sklearn ONNX, and H2O MOJO
+- Cover 17 scenarios across XGBoost, LightGBM, CatBoost, sklearn ONNX, and H2O MOJO
 - All are `#[ignore]` — require Python environment and pre-generated model assets
+- Regenerate all fixtures at once with `python scripts/generate_all_fixtures.py` (CatBoost scenarios currently lack `generate.py` scripts)
 - Model generation scripts: `assets/tests/<format>/<scenario>/generate.py`
 - **Note:** Prediction validation is now real — it compiles the generated `model.rs` with `rustc` at test time, pipes feature rows through stdin, and asserts predictions match ground truth within a specified tolerance.
 

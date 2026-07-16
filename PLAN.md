@@ -27,6 +27,7 @@ bonsai/
 │   │
 │   ├── frontends/          # Format-specific ingest + parse
 │   │   ├── mod.rs          # Frontend trait definition
+│   │   ├── catboost.rs     # CatBoost JSON → IR
 │   │   ├── mojo.rs         # H2O MOJO (.zip) → IR
 │   │   ├── onnx.rs         # ONNX (.onnx) → IR
 │   │   ├── xgboost.rs      # XGBoost JSON (.json) → IR
@@ -49,6 +50,7 @@ bonsai/
 │
 ├── assets/tests/           # Integration test fixtures
 │   ├── common/             # Shared Python data generation utilities
+│   ├── catboost/           # CatBoost regression
 │   ├── xgboost/            # XGBoost regression + classification
 │   ├── lightgbm/           # LightGBM regression + classification
 │   ├── sklearn_onnx/       # sklearn GBM via ONNX (4 variants)
@@ -68,8 +70,9 @@ bonsai/
 |--------|-------|
 | ✅ **H2O MOJO** (v1.40+) | GBM, DRF; Binomial + Gaussian distributions |
 | ✅ **ONNX** | `TreeEnsembleRegressor` + `TreeEnsembleClassifier` operators |
-| ✅ **XGBoost JSON** | `booster.save_model("model.json")`; handles XGBoost 3.x bracket format for `base_score` |
-| ✅ **LightGBM JSON** | `booster.dump_model()`; handles both string and array objective formats |
+| ✅ **XGBoost JSON** | `booster.save_model("model.json")` |
+| ✅ **LightGBM JSON** | `booster.dump_model()` |
+| ✅ **CatBoost JSON** | `model.save_model("model.json", format="json")`; oblivious trees |
 
 ### Supported ML Tasks
 
@@ -86,14 +89,16 @@ bonsai/
 - ✅ **Missing value handling**: `Left`, `Right`, `NaVsRest`, `None`
 - ✅ **Aggregation**: `Sum` (GBM) and `Average` (DRF / RF)
 - ✅ **Base score / intercept**: Preserved in f64
+- ✅ **Oblivious Trees**: Symmetric structure optimization (CatBoost)
 
 ### Code Generation
 
 - ✅ **Zero dependencies**: Generated Rust has no runtime deps
 - ✅ **Inline tree functions**: `#[inline(always)] fn tree_N(features: &[f32]) -> f64`
 - ✅ **f64 aggregation, f32 output**: `predict` returns `f32`; internal accumulation in `f64`
+- ✅ **Batch API**: `predict_batch` and `predict_proba_batch` for high-throughput scoring
 - ✅ **Conditional helpers**: `bitset_contains()` emitted only when categoricals are present
-- ✅ **Multiclass output**: `predict_proba` returns `Vec<f32>` for softmax models
+- ✅ **Multiclass output**: `predict_proba(&self, features: &[f32]) -> Vec<f32>`
 
 ---
 
@@ -128,16 +133,16 @@ pub enum Node {
     Leaf { value: f64 },               // f64 preserves LightGBM's native precision
 }
 
+impl Node {
+    // Detects symmetric structure for branchless fast-path
+    pub fn get_oblivious_splits(&self) -> Option<Vec<(usize, SplitKind, MissingDirection)>>;
+    // Collects leaves in bitmasked order
+    pub fn collect_leaves(&self, out: &mut Vec<f64>);
+}
+
 pub enum SplitKind {
     Numeric     { threshold: f32, operator: Operator },
     Categorical { bitoff: u16, nbits: u32, data: Vec<u8> },
-}
-
-pub enum MissingDirection {
-    Left,      // NaN always goes left
-    Right,     // NaN always goes right
-    NaVsRest,  // Split solely on NaN-ness (non-NaN→left, NaN→right); threshold ignored
-    None,      // Format did not specify; backend defaults to Right
 }
 ```
 
@@ -146,6 +151,11 @@ pub enum MissingDirection {
 ## Pipeline Details
 
 ### Frontend (Ingest + Parse)
+
+**`frontends/catboost.rs`** — CatBoost JSON:
+- Parses `oblivious_trees` with symmetric structure
+- Maps leaf values to a flat array for bitmasked indexing
+- Supports `Logloss` (Binary) and `RMSE` (Regression)
 
 **`frontends/mojo.rs`** — H2O MOJO (`.zip`):
 - Parses `model.ini` for metadata (algo, distribution, link function)
@@ -159,45 +169,47 @@ pub enum MissingDirection {
 - Populates leaves from `target_weights` (regressor) or `class_weights` (classifier)
 
 **`frontends/xgboost.rs`** — XGBoost JSON (`.json`):
-- Strips XGBoost 3.x bracket notation from `base_score` (e.g., `"[0E0]"`)
-- Applies logit to `base_score` when it is in probability space (logistic objectives)
+- Strips XGBoost 3.x bracket notation from `base_score`
+- Applies logit to `base_score` when it is in probability space
 - Flat parallel array format: `left_children`, `right_children`, `split_indices`, etc.
 
 **`frontends/lightgbm.rs`** — LightGBM JSON (`.json`):
-- Handles both string (`"binary sigmoid:1"`) and array (`["binary", "crossentropy"]`) objective formats
-- Recursive `tree_structure` node format with `leaf_value` / `split_feature`
-- Threshold encoded as string or number depending on LightGBM version
+- Handles both string and array objective formats
+- Recursive `tree_structure` node format
+- Threshold encoded as string or number depending on version
 
 ### Backend (Code Generation)
 
 **`backends/rust.rs`:**
 - Emits one `tree_N(features: &[f32]) -> f64` function per tree
-- Recursively compiles `Node` → nested `if/else` blocks
+- **Oblivious Optimization**: Generates branchless bitmasking for symmetric trees
 - `NaVsRest` emits `!val.is_nan()` with no threshold comparison
+- **Batch API**: `predict_batch` chunks input into rows for auto-vectorization
 - Aggregation for `Sum`: `base_score + Σ(Self::tree_N(features) * weight)`
 - Aggregation for `Average`: `Σ(Self::tree_N(features)) / n`
 - Post-transforms: `raw as f32` / `(1/(1+exp(-raw))) as f32` / `raw.exp() as f32`
-- Softmax: generates `predict_proba(&self, features: &[f32]) -> Vec<f32>` instead of `predict`
+- Softmax: generates `predict_proba(&self, features: &[f32]) -> Vec<f32>` and `predict_proba_batch`
 
 ---
 
 ## Testing
 
-### Unit Tests (56 passing)
+### Unit Tests (58 passing)
 
-- `ir.rs`: node traversal, aggregation, post-transforms, missing direction, categoricals
-- `backends/rust.rs`: code generation for identity, logit, softmax; categorical helper inclusion
+- `ir.rs`: node traversal, aggregation, post-transforms, missing direction, categoricals, **oblivious detection**
+- `backends/rust.rs`: code generation for identity, logit, softmax, **oblivious fast-path, batch API**
 - `frontends/xgboost.rs`: tree structure, NaN routing, base_score logit conversion, multiclass
 - `frontends/lightgbm.rs`: tree structure, NaN routing, multiclass, numeric threshold as JSON number
 - `parsers/tree_parser.rs`: H2O MOJO binary format parsing
 
-### Integration Tests (11/15 passing)
+### Integration Tests (12/16 passing)
 
 Each test: transpile model → compile with rustc → score CSV → compare against Python ground truth.
 
 | Test | Status | Tolerance |
 |------|--------|-----------|
-| `xgboost/regression_numeric` | ✅ | 1e-4 (f32 leaf accumulation) |
+| `catboost/regression` | ✅ | 1e-5 |
+| `xgboost/regression_numeric` | ✅ | 1e-4 |
 | `xgboost/classification_numeric` | ✅ | 1e-5 |
 | `xgboost/classification_multiclass` | ✅ | 1e-4 |
 | `lightgbm/regression_numeric` | ✅ | 1e-5 |
@@ -216,22 +228,22 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 ## Known Limitations
 
 - **XGBoost regression leaf precision**: XGBoost stores leaves internally as `f32`, so accumulated error over many trees can reach ~4×10⁻⁵. Regression tolerance is set to 1e-4 accordingly.
-- **H2O MOJO generation**: Requires a Java runtime. The four H2O tests are `#[ignore]` and skip if model files are absent.
-- **ONNX true categorical nodes**: `nodes_categorical_attributes` is not supported; bonsai fails fast with a clear error. H2O-exported ONNX models label-encode categoricals as numeric features, so this does not affect the primary use case.
+- **H2O MOJO generation**: Requires a Java runtime.
+- **ONNX true categorical nodes**: `nodes_categorical_attributes` is not supported.
 
 ---
 
 ## Roadmap
 
 ### Near-Term
-- [x] **Benchmarking Harness**: `benches/xgboost.rs` (Criterion) + `examples/xgboost_benchmark/` (Python). bonsai ~137 ns/row vs ort ~3.5 µs vs Python XGBoost ~46 µs.
-- [ ] **CatBoost JSON support**: Support oblivious tree structures.
+- [x] **Benchmarking Harness**: bonsai ~137 ns/row vs ort ~3.5 µs.
+- [x] **CatBoost JSON support**: Support oblivious tree structures.
+- [x] **SIMD Optimization — Phase 1**: `predict_batch` scalar loop; enables LLVM auto-vectorization.
 - [ ] **CI Integration**: Run integration tests in GitHub Actions using pre-generated/cached assets.
 
 ### Mid-Term
 - [ ] **Python Bindings (PyO3)**: Generate Python-loadable modules for easy validation.
 - [ ] **SHAP value computation**: Feature contributions (TreeSHAP).
-- [ ] **SIMD Optimization — Phase 1**: `predict_batch(features: &[f32], n_features: usize, out: &mut [f32])` scalar loop; enables LLVM auto-vectorization of tree-score accumulation.
 - [ ] **SIMD Optimization — Phase 2**: Oblivious tree evaluation via `std::simd` — evaluate all nodes branchlessly, `select` the leaf. Process 8–16 rows per SIMD lane. Targets trees ≤ depth 8.
 - [ ] **Batch scoring optimization**: Rayon/SIMD integration in `polars_score`.
 
@@ -250,7 +262,7 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 - `clap` — CLI argument parsing
 - `zip` — MOJO archive extraction
 - `byteorder` — little-endian binary parsing
-- `serde_json` — XGBoost / LightGBM JSON parsing
+- `serde_json` — XGBoost / LightGBM / CatBoost JSON parsing
 
 **Code Generation:**
 - `proc-macro2`, `quote` — Rust token stream construction
@@ -264,47 +276,12 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 
 ---
 
-## Development Workflow
-
-```bash
-# Build
-cargo build --release
-
-# Transpile a model
-./target/release/bonsai transpile --input model.json --output model.rs
-
-# Inspect a model
-./target/release/bonsai inspect --input model.json
-
-# Unit tests
-cargo test
-
-# Integration tests (requires generated model fixtures)
-cargo test --test integration_test -- --include-ignored
-```
-
-### Adding a New Frontend
-
-1. Create `src/frontends/newformat.rs`, implement `Frontend` trait (`parse(&self, path: &Path) -> Result<Forest>`)
-2. Add `pub mod newformat;` in `src/frontends/mod.rs`
-3. Wire detection in `src/main.rs` (`detect_and_parse_*` or the JSON probe)
-4. Add generate script under `assets/tests/newformat/*/generate.py`
-5. Add `#[ignore]` integration test in `tests/integration_test.rs`
-
-### Adding a New Backend
-
-1. Create `src/backends/newlang.rs`, implement codegen over `Forest`
-2. Add `--backend` flag to CLI in `src/main.rs`
-3. Add unit tests verifying generated code structure
-
----
-
 ## Philosophy
 
 **Bonsai trims tree models for production:**
 - **No runtime dependencies**: Deploy anywhere (servers, edge, WASM)
 - **Explicit over implicit**: IR makes every transformation auditable
-- **Performance by default**: Inline everything; f64 accumulation, f32 output
-- **Framework-agnostic**: H2O, ONNX, XGBoost, LightGBM — same IR, same backend
+- **Performance by default**: Inline everything; f64 accumulation, f32 output; oblivious fast-path
+- **Framework-agnostic**: H2O, ONNX, XGBoost, LightGBM, CatBoost — same IR, same backend
 
 **Train in Python/R/Java. Deploy as pure Rust.**
