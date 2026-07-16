@@ -1,93 +1,88 @@
 # bonsai
 
-Transpile machine learning tree ensemble models to standalone Rust code.
+Transpile trained tree ensemble models into standalone, dependency-free Rust code.
 
-## Overview
+bonsai converts gradient boosting and random forest models from common training
+frameworks into plain Rust source. The generated module has no runtime
+dependencies and no model-loading step, which makes it a good fit for servers,
+edge devices, and WASM targets where shipping an ML runtime is impractical.
 
-**bonsai** converts trained tree-based models (Random Forests, Gradient Boosting Machines, etc.) from various ML frameworks into efficient, dependency-free Rust code. The generated code can be embedded directly into your application without requiring the original ML runtime.
+## Supported formats
 
-## Supported Formats
+- H2O-3 MOJO (`.zip`)
+- ONNX tree ensembles (`.onnx`, `.pb`)
+- XGBoost native JSON (`booster.save_model("model.json")`)
+- LightGBM JSON dump (`booster.dump_model()`)
+- CatBoost JSON (`model.save_model("model.json", format="json")`), including
+  native categorical (CTR) support and a branchless fast path for oblivious
+  trees
 
-- **H2O-3**: MOJO (native binary format, `.zip`)
-- **ONNX**: Generic tree ensemble models from any framework (`.onnx`)
-- **XGBoost**: Native JSON format (`booster.save_model("model.json")`)
-- **LightGBM**: JSON dump format (`booster.dump_model()`)
+## Installation
 
-## Usage
+Not yet published to crates.io; build from source:
 
-### Transpile a Model
+```bash
+git clone https://github.com/bgreenwell/bonsai
+cd bonsai
+cargo install --path .
+```
+
+## Quick start
 
 ```bash
 # Convert a model to Rust code
-bonsai transpile --input model.zip --output model.rs
+bonsai transpile --input model.json --output model.rs
 
-# Or using cargo
-cargo run -- transpile --input model.zip --output model.rs
-
-# Use the generated model
-rustc model.rs -o predictor
-./predictor < test_data.csv
+# Inspect a model's structure and statistics
+bonsai inspect --input model.json
 ```
 
-### Inspect a Model
+The generated `model.rs` exposes a `Model` struct with `predict` (scalar),
+`predict_batch` (high-throughput batch), `predict_proba` (classification
+probabilities), and, for CatBoost models with categorical features,
+`predict_cat`.
+
+For an end-to-end walkthrough — train an XGBoost model in Python, transpile
+it, and benchmark the result — see [`demo.ipynb`](demo.ipynb).
+
+### Batch scoring CLI
+
+An optional batch scorer built on Polars and Rayon:
 
 ```bash
-# View model structure and statistics
-bonsai inspect model.zip
-
-# Show detailed tree structures (first 3 trees)
-bonsai inspect model.zip --trees
-
-# Show more trees
-bonsai inspect model.zip --trees --num-trees 10
+cargo build --release --features scorer --bin polars_score
+./target/release/polars_score --input data.parquet --output predictions.parquet
 ```
 
-The inspect command shows:
-- Model metadata (trees, features, task type, aggregation)
-- Tree statistics (depth, nodes, split types, missing value handling)
-- Feature usage analysis (most-used features, unused features)
-- Categorical feature details (bitsets, encoding)
-- Tree structure visualization (with --trees flag)
-- Validation warnings (unused features, unusual values)
+## Performance
 
-### Generate Test Models and Data
+Representative numbers from the included Criterion benchmarks (`benches/`),
+using an XGBoost binary classifier:
 
-```bash
-# Generate all test fixtures (requires Python with h2o/scikit-learn)
-./scripts/generate_all_fixtures.sh
-# or
-python3 scripts/generate_all_fixtures.py
+- Single-row latency: ~137 ns per prediction, versus ~3.5 us for ONNX Runtime
+  on the same model.
+- Batch throughput: ~7.5M rows/sec; CatBoost oblivious trees evaluate
+  branchlessly in batch mode.
+- The generated inference code performs no heap allocations.
 
-# Run cargo integration tests
-cargo test --test integration_test -- --include-ignored
-```
+Results vary with model size and hardware; run `cargo bench` to reproduce.
 
-See [`assets/tests/README.md`](assets/tests/README.md) for details on individual test scenarios.
+## Documentation
+
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [PLAN.md](PLAN.md) — architecture notes and roadmap
 
 ## Development
 
 ```bash
-# Run unit tests
-cargo test
+# Quality gate
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 
-# Run all integration tests
-cargo test -- --ignored
+# Integration tests require Python-generated model fixtures;
+# see assets/tests/README.md
+cargo test -- --include-ignored
 ```
-
-See [`CHANGELOG.md`](CHANGELOG.md) for recent changes and fixes.
-
-## Benchmarks
-
-See [`examples/xgboost_benchmark/`](examples/xgboost_benchmark/) for a full comparison of bonsai vs ONNX Runtime (Python + Rust) on a 100-tree XGBoost model. On Apple M-series hardware, bonsai scores a single row in **~137 ns** vs ~3.5 µs for the `ort` Rust crate.
-
-## Future Roadmap
-
-See [`PLAN.md`](PLAN.md) for planned features including:
-- CatBoost JSON support
-- SIMD batch optimization (`predict_batch`)
-- Python bindings (PyO3)
-- WebAssembly (WASM) target
 
 ## License
 
-See LICENSE file for details.
+MIT

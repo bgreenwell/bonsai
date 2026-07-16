@@ -35,6 +35,38 @@ pub enum SplitKind {
         nbits: u32,
         data: Vec<u8>,
     },
+    /// CatBoost-specific categorical split via Online CTR (Counter).
+    /// The actual split logic is handled by the backend using embedded CTR tables.
+    OnlineCtr { ctr_idx: usize, threshold: f32 },
+}
+
+#[derive(Debug, Clone)]
+pub struct CatboostMetadata {
+    pub ctrs: Vec<CtrInfo>,
+    pub ctr_data: std::collections::HashMap<String, CtrValueTable>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CtrInfo {
+    pub elements: Vec<CtrElement>,
+    pub identifier: String,
+    pub prior_numerator: f64,
+    pub prior_denominator: f64,
+    pub scale: f64,
+    pub shift: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CtrElement {
+    pub cat_feature_index: usize,
+    pub combination_element: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CtrValueTable {
+    pub hash_map: Vec<u64>, // [hash, val1, val2, ...] flattened
+    pub hash_stride: usize,
+    pub counter_denominator: i64,
 }
 
 /// A node in the decision tree.
@@ -64,6 +96,116 @@ pub struct Tree {
     pub root: Node,
     /// Per-tree weight. 1.0 for standard GBM / RF / DRF.
     pub weight: f64,
+}
+
+impl Node {
+    /// Walk the node tree to check if it's perfectly oblivious (symmetric).
+    /// If it is, returns the sequence of split parameters from root to leaf.
+    pub fn get_oblivious_splits(&self) -> Option<Vec<(usize, SplitKind, MissingDirection)>> {
+        let mut splits = Vec::new();
+        if self.collect_oblivious_splits(0, &mut splits) && self.is_symmetric(0, splits.len()) {
+            Some(splits)
+        } else {
+            None
+        }
+    }
+
+    fn collect_oblivious_splits(
+        &self,
+        depth: usize,
+        splits: &mut Vec<(usize, SplitKind, MissingDirection)>,
+    ) -> bool {
+        match self {
+            Node::Leaf { .. } => true,
+            Node::Split {
+                feature_idx,
+                split,
+                left_child,
+                right_child,
+                missing_direction,
+            } => {
+                if splits.len() <= depth {
+                    splits.push((*feature_idx, split.clone(), *missing_direction));
+                } else {
+                    let (f, s, m) = &splits[depth];
+                    if f != feature_idx || !split_kind_eq(s, split) || m != missing_direction {
+                        return false;
+                    }
+                }
+                left_child.collect_oblivious_splits(depth + 1, splits)
+                    && right_child.collect_oblivious_splits(depth + 1, splits)
+            }
+        }
+    }
+
+    fn is_symmetric(&self, depth: usize, max_depth: usize) -> bool {
+        match self {
+            Node::Leaf { .. } => depth == max_depth,
+            Node::Split {
+                left_child,
+                right_child,
+                ..
+            } => {
+                depth < max_depth
+                    && left_child.is_symmetric(depth + 1, max_depth)
+                    && right_child.is_symmetric(depth + 1, max_depth)
+            }
+        }
+    }
+
+    /// Walk the node tree to collect all leaf values in RIGHT-to-LEFT order.
+    /// This matches the oblivious index bit logic (0=right, 1=left).
+    pub fn collect_leaves(&self, out: &mut Vec<f64>) {
+        match self {
+            Node::Leaf { value } => out.push(*value),
+            Node::Split {
+                left_child,
+                right_child,
+                ..
+            } => {
+                right_child.collect_leaves(out);
+                left_child.collect_leaves(out);
+            }
+        }
+    }
+}
+
+fn split_kind_eq(a: &SplitKind, b: &SplitKind) -> bool {
+    match (a, b) {
+        (
+            SplitKind::Numeric {
+                threshold: t1,
+                operator: o1,
+            },
+            SplitKind::Numeric {
+                threshold: t2,
+                operator: o2,
+            },
+        ) => t1 == t2 && o1 == o2,
+        (
+            SplitKind::Categorical {
+                bitoff: o1,
+                nbits: n1,
+                data: d1,
+            },
+            SplitKind::Categorical {
+                bitoff: o2,
+                nbits: n2,
+                data: d2,
+            },
+        ) => o1 == o2 && n1 == n2 && d1 == d2,
+        (
+            SplitKind::OnlineCtr {
+                ctr_idx: i1,
+                threshold: t1,
+            },
+            SplitKind::OnlineCtr {
+                ctr_idx: i2,
+                threshold: t2,
+            },
+        ) => i1 == i2 && t1 == t2,
+        _ => false,
+    }
 }
 
 /// How tree outputs are combined before the post-transform is applied.
@@ -105,11 +247,50 @@ pub struct Forest {
     pub base_scores: Vec<f64>,
     pub aggregation: AggregationKind,
     pub post_transform: PostTransform,
+    /// Metadata for CatBoost models using categorical features.
+    pub catboost_metadata: Option<CatboostMetadata>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_oblivious_tree_detection() {
+        let split_kind = SplitKind::Numeric {
+            threshold: 0.5,
+            operator: Operator::GreaterThan,
+        };
+        // Depth 2 oblivious tree
+        let root = Node::Split {
+            feature_idx: 1,
+            split: split_kind.clone(),
+            left_child: Box::new(Node::Split {
+                feature_idx: 0,
+                split: split_kind.clone(),
+                left_child: Box::new(Node::Leaf { value: 3.0 }),
+                right_child: Box::new(Node::Leaf { value: 2.0 }),
+                missing_direction: MissingDirection::None,
+            }),
+            right_child: Box::new(Node::Split {
+                feature_idx: 0,
+                split: split_kind.clone(),
+                left_child: Box::new(Node::Leaf { value: 1.0 }),
+                right_child: Box::new(Node::Leaf { value: 0.0 }),
+                missing_direction: MissingDirection::None,
+            }),
+            missing_direction: MissingDirection::None,
+        };
+
+        let splits = root.get_oblivious_splits().expect("Should be oblivious");
+        assert_eq!(splits.len(), 2);
+        assert_eq!(splits[0].0, 1); // depth 0: root
+        assert_eq!(splits[1].0, 0); // depth 1: children
+
+        let mut leaves = Vec::new();
+        root.collect_leaves(&mut leaves);
+        assert_eq!(leaves, vec![0.0, 1.0, 2.0, 3.0]);
+    }
 
     #[test]
     fn test_simple_leaf_tree() {
@@ -239,6 +420,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
 
         assert_eq!(forest.trees.len(), 1);
@@ -264,6 +446,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Logit,
+            catboost_metadata: None,
         };
 
         assert_eq!(forest.trees.len(), 2);
@@ -278,6 +461,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
 
         assert_eq!(forest.trees.len(), 0);
@@ -448,6 +632,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
 
         let avg_forest = Forest {
@@ -456,6 +641,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Average,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
 
         assert_eq!(sum_forest.aggregation, AggregationKind::Sum);
@@ -629,6 +815,7 @@ mod tests {
             base_scores: vec![],
             aggregation: AggregationKind::Sum,
             post_transform: PostTransform::Identity,
+            catboost_metadata: None,
         };
 
         assert_eq!(forest.trees.len(), 3);

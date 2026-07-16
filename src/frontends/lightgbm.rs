@@ -3,85 +3,68 @@ use crate::ir::{
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use std::fs;
-use std::path::Path;
+pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
+    root.get("tree_info")
+        .ok_or_else(|| anyhow!("Missing 'tree_info' key — not a LightGBM JSON model"))?;
 
-pub struct LightgbmFrontend;
+    // --- Model-level parameters ---
+    let num_tree_per_iteration: usize =
+        root["num_tree_per_iteration"].as_u64().unwrap_or(1) as usize;
 
-impl LightgbmFrontend {
-    pub fn new() -> Self {
-        Self
-    }
-}
+    // objective may be a JSON array ["binary", "crossentropy"] or a
+    // space-separated string "binary sigmoid:1" depending on LightGBM version
+    let objective_name_owned: String;
+    let objective_name = match &root["objective"] {
+        serde_json::Value::Array(arr) => {
+            objective_name_owned = arr
+                .first()
+                .and_then(|v| v.as_str())
+                .unwrap_or("regression")
+                .to_string();
+            objective_name_owned.as_str()
+        }
+        serde_json::Value::String(s) => {
+            objective_name_owned = s
+                .split_whitespace()
+                .next()
+                .unwrap_or("regression")
+                .to_string();
+            objective_name_owned.as_str()
+        }
+        _ => "regression",
+    };
+    println!("   > objective: {}", objective_name);
 
-impl super::Frontend for LightgbmFrontend {
-    fn parse(&self, path: &Path) -> Result<Forest> {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?;
-        let root: Value =
-            serde_json::from_str(&content).context("Failed to parse LightGBM JSON")?;
+    let average_output = root["average_output"].as_bool().unwrap_or(false);
 
-        root.get("tree_info")
-            .ok_or_else(|| anyhow!("Missing 'tree_info' key — not a LightGBM JSON model"))?;
+    let post_transform = post_transform_for_objective(objective_name, num_tree_per_iteration);
+    let aggregation = if average_output {
+        AggregationKind::Average
+    } else {
+        AggregationKind::Sum
+    };
 
-        // --- Model-level parameters ---
-        let num_tree_per_iteration: usize =
-            root["num_tree_per_iteration"].as_u64().unwrap_or(1) as usize;
+    // --- Parse trees ---
+    let trees_arr = root["tree_info"]
+        .as_array()
+        .ok_or_else(|| anyhow!("'tree_info' is not an array"))?;
 
-        // objective may be a JSON array ["binary", "crossentropy"] or a
-        // space-separated string "binary sigmoid:1" depending on LightGBM version
-        let objective_name_owned: String;
-        let objective_name = match &root["objective"] {
-            serde_json::Value::Array(arr) => {
-                objective_name_owned = arr
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("regression")
-                    .to_string();
-                objective_name_owned.as_str()
-            }
-            serde_json::Value::String(s) => {
-                objective_name_owned = s
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("regression")
-                    .to_string();
-                objective_name_owned.as_str()
-            }
-            _ => "regression",
-        };
-        println!("   > objective: {}", objective_name);
+    println!("   > {} trees", trees_arr.len());
 
-        let average_output = root["average_output"].as_bool().unwrap_or(false);
+    let trees: Vec<Tree> = trees_arr
+        .iter()
+        .enumerate()
+        .map(|(i, tv)| parse_tree(tv).with_context(|| format!("tree {}", i)))
+        .collect::<Result<_>>()?;
 
-        let post_transform = post_transform_for_objective(objective_name, num_tree_per_iteration);
-        let aggregation = if average_output {
-            AggregationKind::Average
-        } else {
-            AggregationKind::Sum
-        };
-
-        // --- Parse trees ---
-        let trees_arr = root["tree_info"]
-            .as_array()
-            .ok_or_else(|| anyhow!("'tree_info' is not an array"))?;
-
-        println!("   > {} trees", trees_arr.len());
-
-        let trees: Vec<Tree> = trees_arr
-            .iter()
-            .enumerate()
-            .map(|(i, tv)| parse_tree(tv).with_context(|| format!("tree {}", i)))
-            .collect::<Result<_>>()?;
-
-        Ok(Forest {
-            trees,
-            base_score: 0.0,
-            base_scores: vec![],
-            aggregation,
-            post_transform,
-        })
-    }
+    Ok(Forest {
+        trees,
+        base_score: 0.0,
+        base_scores: vec![],
+        aggregation,
+        post_transform,
+        catboost_metadata: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +141,10 @@ fn parse_node(node: &Value, depth: usize) -> Result<Node> {
             .map(|s| s.trim().parse::<u32>())
             .collect::<std::result::Result<_, _>>()
             .with_context(|| {
-                format!("Invalid categorical threshold '{}': expected pipe-separated integers", threshold_str)
+                format!(
+                    "Invalid categorical threshold '{}': expected pipe-separated integers",
+                    threshold_str
+                )
             })?;
 
         let max_cat = categories.iter().max().copied().unwrap_or(0);
@@ -171,7 +157,11 @@ fn parse_node(node: &Value, depth: usize) -> Result<Node> {
 
         return Ok(Node::Split {
             feature_idx,
-            split: SplitKind::Categorical { bitoff: 0, nbits, data },
+            split: SplitKind::Categorical {
+                bitoff: 0,
+                nbits,
+                data,
+            },
             // Swap: original left (IN set) becomes right; original right becomes left.
             left_child: Box::new(right),
             right_child: Box::new(left),
@@ -228,20 +218,11 @@ fn parse_node(node: &Value, depth: usize) -> Result<Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontends::Frontend;
     use crate::ir::{MissingDirection, PostTransform};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
 
     fn parse(json: &str) -> Forest {
-        let f = write_json(json);
-        LightgbmFrontend::new().parse(f.path()).unwrap()
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
+        parse_json(&root).unwrap()
     }
 
     // Minimal regression tree: root splits feature[0] <= 0.5; left leaf=1.0, right leaf=-1.0
@@ -417,8 +398,8 @@ mod tests {
 
     #[test]
     fn test_missing_tree_info_key_errors() {
-        let f = write_json(r#"{"not_tree_info": []}"#);
-        assert!(LightgbmFrontend::new().parse(f.path()).is_err());
+        let root: serde_json::Value = serde_json::from_str(r#"{"not_tree_info": []}"#).unwrap();
+        assert!(parse_json(&root).is_err());
     }
 
     // Categorical split: decision_type "==" with threshold "0||2" (categories 0 and 2 go left)
@@ -452,7 +433,12 @@ mod tests {
         match &forest.trees[0].root {
             Node::Split {
                 feature_idx,
-                split: SplitKind::Categorical { bitoff, nbits, data },
+                split:
+                    SplitKind::Categorical {
+                        bitoff,
+                        nbits,
+                        data,
+                    },
                 left_child,
                 right_child,
                 missing_direction,
@@ -460,7 +446,7 @@ mod tests {
                 assert_eq!(*feature_idx, 3);
                 assert_eq!(*bitoff, 0);
                 assert_eq!(*nbits, 3); // max category is 2, so nbits = 3
-                // categories 0 and 2 are set: bits 0 and 2 → 0b00000101 = 0x05
+                                       // categories 0 and 2 are set: bits 0 and 2 → 0b00000101 = 0x05
                 assert_eq!(data[0], 0x05, "bitset byte should have bits 0 and 2 set");
 
                 // After child-swap: bonsai IN-bitset → right (original left = 5.0)
@@ -468,14 +454,16 @@ mod tests {
                 match left_child.as_ref() {
                     Node::Leaf { value } => assert!(
                         (value + 5.0).abs() < 1e-9,
-                        "left should be original right child (-5.0), got {}", value
+                        "left should be original right child (-5.0), got {}",
+                        value
                     ),
                     _ => panic!("expected leaf"),
                 }
                 match right_child.as_ref() {
                     Node::Leaf { value } => assert!(
                         (value - 5.0).abs() < 1e-9,
-                        "right should be original left child (5.0), got {}", value
+                        "right should be original left child (5.0), got {}",
+                        value
                     ),
                     _ => panic!("expected leaf"),
                 }
@@ -546,9 +534,9 @@ mod tests {
             }
           }]
         }"#;
-        let f = write_json(json);
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
         assert!(
-            LightgbmFrontend::new().parse(f.path()).is_err(),
+            parse_json(&root).is_err(),
             "should fail on non-integer categorical threshold"
         );
     }

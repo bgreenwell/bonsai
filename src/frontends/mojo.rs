@@ -104,6 +104,7 @@ impl super::Frontend for MojoFrontend {
             base_scores: vec![],
             aggregation,
             post_transform,
+            catboost_metadata: None,
         })
     }
 }

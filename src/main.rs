@@ -13,7 +13,7 @@ pub mod onnx {
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use frontends::Frontend;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -86,7 +86,7 @@ fn transpile_command(input: PathBuf, output: PathBuf) -> anyhow::Result<()> {
 }
 
 fn inspect_command(input: PathBuf, show_trees: bool, num_trees: usize) -> anyhow::Result<()> {
-    println!("🔍 bonsai inspect: {:?}\n", input);
+    println!("🔍 bonsai inspect: {:?}\n", input.display());
 
     let forest = parse_model(&input)?;
     inspector::inspect(&forest, show_trees, num_trees);
@@ -94,48 +94,45 @@ fn inspect_command(input: PathBuf, show_trees: bool, num_trees: usize) -> anyhow
     Ok(())
 }
 
-/// Peek at a .json file to determine whether it is XGBoost or LightGBM, then parse it.
-fn detect_and_parse_json(input: &PathBuf) -> anyhow::Result<ir::Forest> {
+/// Read a .json file once, detect the framework from its top-level keys, and parse it.
+fn detect_and_parse_json(input: &Path) -> anyhow::Result<ir::Forest> {
     let content =
         std::fs::read_to_string(input).with_context(|| format!("Failed to read {:?}", input))?;
-    let probe: serde_json::Value = serde_json::from_str(&content)
+    let root: serde_json::Value = serde_json::from_str(&content)
         .context("Failed to parse JSON — is this a valid model file?")?;
 
-    if probe.get("learner").is_some() {
+    if root.get("learner").is_some() {
         println!("   > Detected XGBoost JSON");
-        frontends::xgboost::XgboostFrontend::new().parse(input)
-    } else if probe.get("tree_info").is_some() {
+        frontends::xgboost::parse_json(&root)
+    } else if root.get("tree_info").is_some() {
         println!("   > Detected LightGBM JSON");
-        frontends::lightgbm::LightgbmFrontend::new().parse(input)
+        frontends::lightgbm::parse_json(&root)
+    } else if root.get("oblivious_trees").is_some() {
+        println!("   > Detected CatBoost JSON");
+        frontends::catboost::parse_json(&root)
     } else {
         anyhow::bail!(
             "Unrecognized JSON model format in '{:?}'. \
-             Expected XGBoost JSON (top-level 'learner' key) \
-             or LightGBM JSON (top-level 'tree_info' key).",
+             Expected XGBoost JSON (top-level 'learner' key), \
+             LightGBM JSON (top-level 'tree_info' key), \
+             or CatBoost JSON (top-level 'oblivious_trees' key).",
             input
         )
     }
 }
 
-/// Parse a model file into IR based on file extension
-fn parse_model(input: &PathBuf) -> anyhow::Result<ir::Forest> {
+/// Parse a model file into IR based on file extension.
+fn parse_model(input: &Path) -> anyhow::Result<ir::Forest> {
     let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
-        "zip" => {
-            let fe = frontends::mojo::MojoFrontend::new();
-            fe.parse(input)
-        }
-        "onnx" | "pb" => {
-            let fe = frontends::onnx::OnnxFrontend::new();
-            fe.parse(input)
-        }
+        "zip" => frontends::mojo::MojoFrontend::new().parse(input),
+        "onnx" | "pb" => frontends::onnx::OnnxFrontend::new().parse(input),
         "json" => detect_and_parse_json(input),
-        _ => {
-            anyhow::bail!(
-                "Unsupported file extension '.{}'. Expected .zip (MOJO), .onnx/.pb (ONNX), or .json (XGBoost/LightGBM).",
-                ext
-            );
-        }
+        _ => anyhow::bail!(
+            "Unsupported file extension '.{}'. \
+             Expected .zip (MOJO), .onnx/.pb (ONNX), or .json (XGBoost/LightGBM/CatBoost).",
+            ext
+        ),
     }
 }

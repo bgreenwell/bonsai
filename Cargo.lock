@@ -249,12 +249,10 @@ dependencies = [
  "proc-macro2",
  "prost",
  "prost-build",
- "prost-types",
  "quote",
  "rayon",
  "serde_json",
  "tempfile",
- "thiserror",
  "zip",
 ]
 

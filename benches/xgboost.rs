@@ -54,12 +54,10 @@ fn bench_bonsai(c: &mut Criterion) {
             BenchmarkId::new("bonsai/batch", batch_size),
             &batch_size,
             |b, &n| {
+                let mut out = vec![0.0f32; n];
                 b.iter(|| {
-                    let mut sum = 0.0f32;
-                    for i in 0..n {
-                        sum += model.predict(black_box(&batch[i * N_FEATURES..(i + 1) * N_FEATURES]));
-                    }
-                    black_box(sum)
+                    model.predict_batch(black_box(&batch), N_FEATURES, black_box(&mut out));
+                    black_box(&out);
                 })
             },
         );
@@ -96,12 +94,9 @@ fn bench_ort(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("ort/single", |b| {
         b.iter(|| {
-            let array =
-                ndarray::Array2::from_shape_vec((1, N_FEATURES), features.clone()).unwrap();
+            let array = ndarray::Array2::from_shape_vec((1, N_FEATURES), features.clone()).unwrap();
             let input = Tensor::from_array(array).unwrap();
-            let outputs = session
-                .run(ort::inputs!["float_input" => input])
-                .unwrap();
+            let outputs = session.run(ort::inputs!["float_input" => input]).unwrap();
             let probs = outputs[1].try_extract_tensor::<f32>().unwrap().1;
             black_box(probs[1]) // positive-class probability
         })
@@ -125,9 +120,7 @@ fn bench_ort(c: &mut Criterion) {
                     let array =
                         ndarray::Array2::from_shape_vec((n, N_FEATURES), batch.clone()).unwrap();
                     let input = Tensor::from_array(array).unwrap();
-                    let outputs = session
-                        .run(ort::inputs!["float_input" => input])
-                        .unwrap();
+                    let outputs = session.run(ort::inputs!["float_input" => input]).unwrap();
                     let probs = outputs[1].try_extract_tensor::<f32>().unwrap().1;
                     black_box(probs[1])
                 })

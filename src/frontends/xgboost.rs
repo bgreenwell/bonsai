@@ -3,97 +3,79 @@ use crate::ir::{
 };
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use std::fs;
-use std::path::Path;
+pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
+    let learner = root
+        .get("learner")
+        .ok_or_else(|| anyhow!("Missing 'learner' key — not an XGBoost JSON model"))?;
 
-pub struct XgboostFrontend;
+    // --- Model-level parameters ---
+    let model_param = &learner["learner_model_param"];
 
-impl XgboostFrontend {
-    pub fn new() -> Self {
-        Self
-    }
-}
+    let base_score_str = model_param["base_score"].as_str().unwrap_or("0.5");
+    // XGBoost 3.x wraps base_score in brackets. For binary/regression: "[5E-1]" → scalar.
+    // For multiclass: "[v0,v1,v2]" → one value per class.
+    let base_score_inner = base_score_str.trim_matches(|c| c == '[' || c == ']');
 
-impl super::Frontend for XgboostFrontend {
-    fn parse(&self, path: &Path) -> Result<Forest> {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?;
-        let root: Value = serde_json::from_str(&content).context("Failed to parse XGBoost JSON")?;
+    let num_class: usize = model_param["num_class"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
-        let learner = root
-            .get("learner")
-            .ok_or_else(|| anyhow!("Missing 'learner' key — not an XGBoost JSON model"))?;
+    // --- Objective → post-transform ---
+    let objective_name = learner["objective"]["name"]
+        .as_str()
+        .unwrap_or("reg:squarederror");
+    println!("   > objective: {}", objective_name);
 
-        // --- Model-level parameters ---
-        let model_param = &learner["learner_model_param"];
+    let post_transform = post_transform_for_objective(objective_name, num_class);
 
-        let base_score_str = model_param["base_score"].as_str().unwrap_or("0.5");
-        // XGBoost 3.x wraps base_score in brackets. For binary/regression: "[5E-1]" → scalar.
-        // For multiclass: "[v0,v1,v2]" → one value per class.
-        let base_score_inner = base_score_str.trim_matches(|c| c == '[' || c == ']');
-
-        let num_class: usize = model_param["num_class"]
-            .as_str()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-
-        // --- Objective → post-transform ---
-        let objective_name = learner["objective"]["name"]
-            .as_str()
-            .unwrap_or("reg:squarederror");
-        println!("   > objective: {}", objective_name);
-
-        let post_transform = post_transform_for_objective(objective_name, num_class);
-
-        // Parse base_score: scalar for binary/regression, vector for multiclass.
-        let (base_score, base_scores) = if base_score_inner.contains(',') {
-            // Multiclass vector: "[v0,v1,v2]" → Vec<f64>
-            let scores: Vec<f64> = base_score_inner
-                .split(',')
-                .map(|s| s.trim().parse::<f64>())
-                .collect::<std::result::Result<_, _>>()
-                .with_context(|| {
-                    format!("Invalid multiclass base_score vector: '{}'", base_score_str)
-                })?;
-            (0.0f64, scores)
+    // Parse base_score: scalar for binary/regression, vector for multiclass.
+    let (base_score, base_scores) = if base_score_inner.contains(',') {
+        // Multiclass vector: "[v0,v1,v2]" → Vec<f64>
+        let scores: Vec<f64> = base_score_inner
+            .split(',')
+            .map(|s| s.trim().parse::<f64>())
+            .collect::<std::result::Result<_, _>>()
+            .with_context(|| {
+                format!("Invalid multiclass base_score vector: '{}'", base_score_str)
+            })?;
+        (0.0f64, scores)
+    } else {
+        // Scalar: XGBoost may store in probability space for logistic objectives.
+        let raw: f64 = base_score_inner
+            .parse()
+            .with_context(|| format!("Invalid base_score: '{}'", base_score_str))?;
+        let converted = if matches!(post_transform, PostTransform::Logit) && raw > 0.0 && raw < 1.0
+        {
+            (raw / (1.0 - raw)).ln()
         } else {
-            // Scalar: XGBoost may store in probability space for logistic objectives.
-            let raw: f64 = base_score_inner
-                .parse()
-                .with_context(|| format!("Invalid base_score: '{}'", base_score_str))?;
-            let converted = if matches!(post_transform, PostTransform::Logit)
-                && raw > 0.0
-                && raw < 1.0
-            {
-                (raw / (1.0 - raw)).ln()
-            } else {
-                raw
-            };
-            (converted, vec![])
+            raw
         };
+        (converted, vec![])
+    };
 
-        // --- Parse trees ---
-        let trees_val = &learner["gradient_booster"]["model"]["trees"];
-        let trees_arr = trees_val
-            .as_array()
-            .ok_or_else(|| anyhow!("learner.gradient_booster.model.trees is not an array"))?;
+    // --- Parse trees ---
+    let trees_val = &learner["gradient_booster"]["model"]["trees"];
+    let trees_arr = trees_val
+        .as_array()
+        .ok_or_else(|| anyhow!("learner.gradient_booster.model.trees is not an array"))?;
 
-        println!("   > {} trees", trees_arr.len());
+    println!("   > {} trees", trees_arr.len());
 
-        let trees: Vec<Tree> = trees_arr
-            .iter()
-            .enumerate()
-            .map(|(i, tv)| parse_tree(tv).with_context(|| format!("tree {}", i)))
-            .collect::<Result<_>>()?;
+    let trees: Vec<Tree> = trees_arr
+        .iter()
+        .enumerate()
+        .map(|(i, tv)| parse_tree(tv).with_context(|| format!("tree {}", i)))
+        .collect::<Result<_>>()?;
 
-        Ok(Forest {
-            trees,
-            base_score,
-            base_scores,
-            aggregation: AggregationKind::Sum,
-            post_transform,
-        })
-    }
+    Ok(Forest {
+        trees,
+        base_score,
+        base_scores,
+        aggregation: AggregationKind::Sum,
+        post_transform,
+        catboost_metadata: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +177,10 @@ fn int_array(val: &Value) -> Result<Vec<i64>> {
     val.as_array()
         .ok_or_else(|| anyhow!("expected array, got {:?}", val.as_str().unwrap_or("?")))?
         .iter()
-        .map(|v| v.as_i64().ok_or_else(|| anyhow!("expected integer, got {:?}", v)))
+        .map(|v| {
+            v.as_i64()
+                .ok_or_else(|| anyhow!("expected integer, got {:?}", v))
+        })
         .collect()
 }
 
@@ -218,20 +203,11 @@ fn float_array(val: &Value) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontends::Frontend;
     use crate::ir::{MissingDirection, PostTransform};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn write_json(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
-    }
 
     fn parse(json: &str) -> Forest {
-        let f = write_json(json);
-        XgboostFrontend::new().parse(f.path()).unwrap()
+        let root: serde_json::Value = serde_json::from_str(json).unwrap();
+        parse_json(&root).unwrap()
     }
 
     // Minimal 3-node tree: root splits feature[0] < 0.5; left leaf=1.0, right leaf=-1.0
@@ -363,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_missing_learner_key_errors() {
-        let f = write_json(r#"{"not_learner": {}}"#);
-        assert!(XgboostFrontend::new().parse(f.path()).is_err());
+        let root: serde_json::Value = serde_json::from_str(r#"{"not_learner": {}}"#).unwrap();
+        assert!(parse_json(&root).is_err());
     }
 }

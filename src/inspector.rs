@@ -58,9 +58,13 @@ fn print_tree_statistics(forest: &Forest) {
     let mut leaf_counts = Vec::new();
     let mut numeric_splits = 0;
     let mut categorical_splits = 0;
+    let mut oblivious_trees = 0;
     let mut missing_directions = HashMap::new();
 
     for tree in &forest.trees {
+        if tree.root.get_oblivious_splits().is_some() {
+            oblivious_trees += 1;
+        }
         let (depth, nodes, leaves, numeric, categorical, missing) = analyze_tree(&tree.root);
         depths.push(depth);
         node_counts.push(nodes);
@@ -82,6 +86,15 @@ fn print_tree_statistics(forest: &Forest) {
         "Tree depths:        min={}, max={}, avg={:.1}",
         min_depth, max_depth, avg_depth
     );
+
+    if oblivious_trees > 0 {
+        println!(
+            "Oblivious trees:    {} / {} ({:.1}%)",
+            oblivious_trees,
+            forest.trees.len(),
+            (oblivious_trees as f64 / forest.trees.len() as f64) * 100.0
+        );
+    }
 
     // Node statistics
     let total_nodes: usize = node_counts.iter().sum();
@@ -165,7 +178,7 @@ fn analyze_tree(
 
             let (numeric, categorical) = match split {
                 SplitKind::Numeric { .. } => (1, 0),
-                SplitKind::Categorical { .. } => (0, 1),
+                SplitKind::Categorical { .. } | SplitKind::OnlineCtr { .. } => (0, 1),
             };
 
             // Merge missing direction counts
@@ -301,7 +314,8 @@ fn print_categorical_details(forest: &Forest) {
         println!("\nFeature {}:", feature_idx);
         println!("  Number of categorical splits: {}", infos.len());
 
-        // Analyze bitset ranges
+        // Analyze bitset ranges; unwraps can't fail — a feature only has a map
+        // entry if at least one categorical split was collected for it
         let min_bitoff = infos.iter().map(|i| i.bitoff).min().unwrap();
         let max_bitoff = infos.iter().map(|i| i.bitoff).max().unwrap();
         let min_nbits = infos.iter().map(|i| i.nbits).min().unwrap();
@@ -413,6 +427,9 @@ fn print_node(node: &Node, depth: usize) {
                         nbits,
                         data.len()
                     )
+                }
+                SplitKind::OnlineCtr { ctr_idx, threshold } => {
+                    format!("ctr[{}] > {:.6}", ctr_idx, threshold)
                 }
             };
 

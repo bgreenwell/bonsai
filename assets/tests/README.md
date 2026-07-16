@@ -15,7 +15,11 @@ tests/
 │   ├── classification_numeric/
 │   ├── classification_categorical/
 │   ├── regression_numeric/
-│   └── regression_categorical/  # IMPORTANT: Tests categorical bitset fix
+│   └── regression_categorical/
+│
+├── catboost/                  # CatBoost format tests
+│   ├── regression/
+│   └── multiclass/
 │
 └── sklearn_onnx/              # sklearn → ONNX tests
     ├── classification_numeric/
@@ -40,6 +44,8 @@ tests/
 | XGBoost | Regression | Numeric only | ✅ Implemented |
 | LightGBM | Classification | Numeric only | ✅ Implemented |
 | LightGBM | Regression | Numeric only | ✅ Implemented |
+| CatBoost | Regression | Numeric only | ✅ Implemented |
+| CatBoost | Multiclass | Numeric only | ✅ Implemented |
 
 ## Running Tests
 
