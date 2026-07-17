@@ -271,7 +271,7 @@ let code = quote! {
 
 4. **Update documentation:**
    - Add to README.md supported formats
-   - Update PLAN.md roadmap
+   - Update the roadmap in `.agents/PLAN.md` (local planning notes, not version controlled)
 
 ## Philosophy and Design Decisions
 
@@ -289,4 +289,4 @@ let code = quote! {
 - `src/frontends/mojo.rs` - H2O MOJO parser
 - `src/parsers/tree_parser.rs` - Low-level MOJO binary tree parsing
 - `src/backends/rust.rs` - Rust code generation (especially `compile_node()`)
-- `PLAN.md` - Detailed architecture and roadmap
+- `.agents/PLAN.md` - Detailed architecture and roadmap (local planning notes, gitignored)

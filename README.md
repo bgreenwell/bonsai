@@ -94,12 +94,12 @@ using an XGBoost binary classifier:
   branchlessly in batch mode.
 - The generated inference code performs no heap allocations.
 
-Results vary with model size and hardware; run `cargo bench` to reproduce.
+Results vary with model size and hardware; run `cargo bench --features bench-models` to reproduce (after generating the example model).
 
 ## Documentation
 
 - [CHANGELOG.md](CHANGELOG.md) - release history
-- [PLAN.md](PLAN.md) - architecture notes and roadmap
+- [AGENTS.md](AGENTS.md) - architecture map and development notes
 
 ## Development
 

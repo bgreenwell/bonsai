@@ -7,3 +7,4 @@ examples/**/generated/
 model_generated.rs
 temp/
 catboost_info/
+.agents/
