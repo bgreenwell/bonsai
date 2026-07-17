@@ -37,7 +37,7 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
 
     let average_output = root["average_output"].as_bool().unwrap_or(false);
 
-    let post_transform = post_transform_for_objective(objective_name, num_tree_per_iteration);
+    let post_transform = post_transform_for_objective(objective_name, num_tree_per_iteration)?;
     let aggregation = if average_output {
         AggregationKind::Average
     } else {
@@ -71,18 +71,62 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
 // Objective mapping
 // ---------------------------------------------------------------------------
 
-fn post_transform_for_objective(name: &str, num_tree_per_iteration: usize) -> PostTransform {
-    match name {
-        "binary" | "cross_entropy" | "cross_entropy_lambda" | "binary_crossentropy" => {
-            PostTransform::Logit
+// Mappings verified against LightGBM's own predict() vs raw_score output.
+fn post_transform_for_objective(
+    name: &str,
+    num_tree_per_iteration: usize,
+) -> Result<PostTransform> {
+    Ok(match name {
+        "binary" | "cross_entropy" | "binary_crossentropy" | "xentropy" => PostTransform::Logit,
+        "multiclass" | "softmax" => PostTransform::Softmax {
+            n_classes: num_tree_per_iteration.max(2),
+        },
+        // One-vs-all applies a per-class sigmoid, not softmax, which the IR
+        // cannot express yet.
+        "multiclassova" | "multiclass_ova" | "ova" | "ovr" => anyhow::bail!(
+            "multiclassova applies a per-class sigmoid, which bonsai does not \
+             implement; retrain with objective=multiclass"
+        ),
+        // cross_entropy_lambda's output transform is neither sigmoid nor a
+        // log link; reject rather than mis-predict.
+        "cross_entropy_lambda" | "xentlambda" => anyhow::bail!(
+            "cross_entropy_lambda uses an output transform bonsai does not \
+             implement; retrain with objective=cross_entropy"
+        ),
+        // Log-link objectives: LightGBM applies exp() at prediction time.
+        "poisson" | "gamma" | "tweedie" => PostTransform::Log,
+        // Raw-score objectives, including ranking.
+        "regression"
+        | "regression_l2"
+        | "l2"
+        | "mean_squared_error"
+        | "mse"
+        | "l2_root"
+        | "root_mean_squared_error"
+        | "rmse"
+        | "regression_l1"
+        | "l1"
+        | "mean_absolute_error"
+        | "mae"
+        | "huber"
+        | "fair"
+        | "quantile"
+        | "mape"
+        | "mean_absolute_percentage_error"
+        | "lambdarank"
+        | "rank_xendcg"
+        | "xendcg"
+        | "xe_ndcg"
+        | "xe_ndcg_mart"
+        | "xendcg_mart" => PostTransform::Identity,
+        other => {
+            println!(
+                "   ! Unknown objective '{}', emitting raw scores (no post-transform)",
+                other
+            );
+            PostTransform::Identity
         }
-        "multiclass" | "softmax" | "multiclassova" | "multiclass_ova" | "ovr" => {
-            PostTransform::Softmax {
-                n_classes: num_tree_per_iteration.max(2),
-            }
-        }
-        _ => PostTransform::Identity,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -539,5 +583,35 @@ mod tests {
             parse_json(&root).is_err(),
             "should fail on non-integer categorical threshold"
         );
+    }
+
+    #[test]
+    fn test_log_link_and_ranking_objectives() {
+        let poisson = parse(
+            &REGRESSION_JSON.replace(r#"["regression", "mean_squared_error"]"#, r#"["poisson"]"#),
+        );
+        assert_eq!(poisson.post_transform, PostTransform::Log);
+
+        let rank = parse(&REGRESSION_JSON.replace(
+            r#"["regression", "mean_squared_error"]"#,
+            r#"["lambdarank"]"#,
+        ));
+        assert_eq!(rank.post_transform, PostTransform::Identity);
+    }
+
+    #[test]
+    fn test_unsupported_transforms_rejected() {
+        for obj in ["multiclassova", "cross_entropy_lambda"] {
+            let json = REGRESSION_JSON.replace(
+                r#"["regression", "mean_squared_error"]"#,
+                &format!(r#"["{}"]"#, obj),
+            );
+            let root: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert!(
+                parse_json(&root).is_err(),
+                "objective '{}' should be rejected",
+                obj
+            );
+        }
     }
 }

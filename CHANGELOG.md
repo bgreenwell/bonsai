@@ -18,9 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Array code layout (`--layout`) for large forests, auto-selected above 10k nodes.
 - Reproducible CatBoost fixture generation scripts (`assets/tests/catboost/*/generate.py`).
 - CI job that regenerates fixtures and runs XGBoost, LightGBM, CatBoost, and sklearn ONNX integration tests.
+- XGBoost DART booster support via weight_drop tree scaling.
+- Log-link objectives (Poisson, gamma, Tweedie) for XGBoost and LightGBM.
+- Ranking objectives (XGBoost rank:*, LightGBM lambdarank/xendcg) emit raw scores.
+- Clear errors for unsupported models: XGBoost gblinear, native categorical splits, multi-output; LightGBM multiclassova and cross_entropy_lambda.
 
 ### Fixed
 - Oblivious-tree fast path returned depth-reversed leaves for trees deeper than one level.
 - Transpiler panicked on non-finite split thresholds and leaf values.
 - CatBoost multiclass leaf values were read in the wrong order for trees deeper than one level.
 - CatBoost loss function was not detected in newer JSON exports.
+- LightGBM Poisson/gamma/Tweedie models were missing the exp() output transform.
+- XGBoost DART models were scored without weight_drop scaling.
