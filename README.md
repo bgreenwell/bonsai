@@ -1,4 +1,8 @@
-# bonsai
+# 🌱 bonsai
+
+[![CI](https://img.shields.io/github/actions/workflow/status/bgreenwell/bonsai/ci.yml?style=for-the-badge)](https://github.com/bgreenwell/bonsai/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-%232196F3.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/rust-1.87%2B-%23D34516.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
 Transpile trained tree ensemble models into standalone, dependency-free Rust code.
 

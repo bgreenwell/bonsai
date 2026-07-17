@@ -2,6 +2,7 @@
 name = "bonsai"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 authors = ["Brandon Greenwell <greenwell.brandon@gmail.com>"]
 description = "A tree ensemble model transpiler (XGBoost, LightGBM, CatBoost) to standalone Rust."
 license = "MIT"
