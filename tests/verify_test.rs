@@ -123,6 +123,23 @@ fn test_verify_multiclass_pass() {
 }
 
 #[test]
+fn test_verify_interpreter_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = "feature_0,feature_1,ground_truth\n0.1,0,1.0\n0.9,0,-1.0\nnan,0,-1.0\n";
+    let out = run_verify(dir.path(), SCALAR_MODEL, csv, &["--engine", "interpret"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("engine: interpreter"), "got: {stdout}");
+    assert!(stdout.contains("all 3 predictions within"), "got: {stdout}");
+    // The interpreter path never invokes rustc.
+    assert!(!stdout.contains("compiled generated code"), "got: {stdout}");
+}
+
+#[test]
 fn test_verify_array_layout() {
     let dir = tempfile::tempdir().unwrap();
     let csv = "feature_0,feature_1,ground_truth\n0.1,0,1.0\n0.9,0,-1.0\n";
