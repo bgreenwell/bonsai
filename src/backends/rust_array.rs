@@ -374,7 +374,7 @@ mod tests {
         ARRAY_LAYOUT_NODE_THRESHOLD,
     };
     use crate::ir::{AggregationKind, MissingDirection, Node, Operator, PostTransform, Tree};
-    use std::process::Command;
+    use crate::testutil::compile_and_run;
 
     fn leaf(v: f64) -> Node {
         Node::Leaf { value: v }
@@ -563,30 +563,6 @@ mod tests {
     // bit-identical predictions.
     // -----------------------------------------------------------------------
 
-    /// Compile `model_code` + `driver` in a temp dir and return the harness stdout.
-    fn compile_and_run(model_code: &str, driver: &str) -> String {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("model.rs"), model_code).unwrap();
-        std::fs::write(dir.path().join("main.rs"), driver).unwrap();
-        let bin = dir.path().join("harness");
-        let out = Command::new("rustc")
-            .arg("--edition")
-            .arg("2021")
-            .arg("-o")
-            .arg(&bin)
-            .arg(dir.path().join("main.rs"))
-            .output()
-            .expect("failed to invoke rustc");
-        assert!(
-            out.status.success(),
-            "rustc failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let run = Command::new(&bin).output().expect("failed to run harness");
-        assert!(run.status.success());
-        String::from_utf8(run.stdout).unwrap()
-    }
-
     const SCALAR_DRIVER: &str = r#"
 mod model { include!("model.rs"); }
 fn main() {
@@ -722,6 +698,7 @@ fn main() {
     /// Compile `model_code` inside a `#![no_std]` library crate; fails if the
     /// generated code touches anything outside core.
     fn compile_no_std_lib(model_code: &str) {
+        use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("model.rs"), model_code).unwrap();
         std::fs::write(

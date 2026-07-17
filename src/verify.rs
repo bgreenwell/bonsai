@@ -19,7 +19,13 @@ use std::process::{Command, Stdio};
 /// How many individual mismatches to print before summarizing.
 const MAX_REPORTED_MISMATCHES: usize = 5;
 
-pub fn run(forest: &Forest, data_path: &Path, tolerance: f32, layout: Layout) -> Result<()> {
+pub fn run(
+    forest: &Forest,
+    data_path: &Path,
+    tolerance: f32,
+    layout: Layout,
+    use_interpreter: bool,
+) -> Result<()> {
     anyhow::ensure!(
         forest.catboost_metadata.is_none(),
         "verify does not support CatBoost categorical (CTR) models yet; \
@@ -46,6 +52,32 @@ pub fn run(forest: &Forest, data_path: &Path, tolerance: f32, layout: Layout) ->
         }
     );
 
+    let predictions = if use_interpreter {
+        println!("   > engine: interpreter");
+        parsed
+            .rows
+            .iter()
+            .map(|row| crate::interpreter::predict(forest, row))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        compile_and_score(forest, layout, &parsed, n_classes)?
+    };
+    anyhow::ensure!(
+        predictions.len() == parsed.rows.len(),
+        "Prediction count ({}) does not match row count ({})",
+        predictions.len(),
+        parsed.rows.len()
+    );
+
+    compare(&predictions, &parsed, tolerance, n_classes)
+}
+
+fn compile_and_score(
+    forest: &Forest,
+    layout: Layout,
+    parsed: &ParsedData,
+    n_classes: usize,
+) -> Result<Vec<Vec<f32>>> {
     // --- Generate and compile ---
     let resolved = rust::resolve_layout(forest, layout)?;
     println!("   > code layout: {:?}", resolved);
@@ -94,15 +126,15 @@ pub fn run(forest: &Forest, data_path: &Path, tolerance: f32, layout: Layout) ->
     let output = child.wait_with_output()?;
     anyhow::ensure!(output.status.success(), "verify harness exited with error");
 
-    let predictions = parse_predictions(&String::from_utf8_lossy(&output.stdout), n_classes)?;
-    anyhow::ensure!(
-        predictions.len() == parsed.rows.len(),
-        "Prediction count ({}) does not match row count ({})",
-        predictions.len(),
-        parsed.rows.len()
-    );
+    parse_predictions(&String::from_utf8_lossy(&output.stdout), n_classes)
+}
 
-    // --- Compare ---
+fn compare(
+    predictions: &[Vec<f32>],
+    parsed: &ParsedData,
+    tolerance: f32,
+    n_classes: usize,
+) -> Result<()> {
     let mut mismatches = 0usize;
     let mut max_abs_error = 0.0f32;
     for (i, (pred_row, ref_row)) in predictions.iter().zip(parsed.references.iter()).enumerate() {

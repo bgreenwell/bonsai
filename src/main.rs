@@ -2,8 +2,11 @@ mod backends;
 mod emit_crate;
 mod frontends;
 mod inspector;
+mod interpreter;
 mod ir;
 mod parsers;
+#[cfg(test)]
+mod testutil;
 mod verify;
 
 /// Generated ONNX protobuf bindings (produced by prost-build from src/proto/onnx.proto).
@@ -84,6 +87,12 @@ enum Commands {
         /// Code layout to verify
         #[arg(long, value_enum, default_value_t = LayoutArg::Auto)]
         layout: LayoutArg,
+
+        /// Scoring engine: compile the generated code with rustc, or use
+        /// the built-in IR interpreter (no Rust toolchain needed; output is
+        /// bit-identical to compiled code)
+        #[arg(long, value_enum, default_value_t = EngineArg::Compile)]
+        engine: EngineArg,
     },
 
     /// Inspect a model's structure and metadata
@@ -116,6 +125,12 @@ enum EmitArg {
     Crate,
 }
 
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+enum EngineArg {
+    Compile,
+    Interpret,
+}
+
 impl From<LayoutArg> for backends::rust::Layout {
     fn from(arg: LayoutArg) -> Self {
         match arg {
@@ -144,7 +159,14 @@ fn main() -> anyhow::Result<()> {
             data,
             tolerance,
             layout,
-        } => verify_command(input, data, tolerance, layout.into()),
+            engine,
+        } => verify_command(
+            input,
+            data,
+            tolerance,
+            layout.into(),
+            engine == EngineArg::Interpret,
+        ),
         Commands::Inspect {
             input,
             trees,
@@ -158,11 +180,12 @@ fn verify_command(
     data: PathBuf,
     tolerance: f32,
     layout: backends::rust::Layout,
+    use_interpreter: bool,
 ) -> anyhow::Result<()> {
     println!("🔍 bonsai verify: {:?} against {:?}", input, data);
     let forest = parse_model(&input)?;
     println!("   > {} trees in forest", forest.trees.len());
-    verify::run(&forest, &data, tolerance, layout)
+    verify::run(&forest, &data, tolerance, layout, use_interpreter)
 }
 
 fn transpile_command(

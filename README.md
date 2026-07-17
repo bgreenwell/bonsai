@@ -37,6 +37,10 @@ bonsai transpile --input model.json --output model.rs
 # transpiles, compiles with rustc, scores the CSV, and diffs
 bonsai verify --input model.json --data test.csv --tolerance 1e-5
 
+# Same check without compiling, via the built-in IR interpreter
+# (bit-identical to compiled output)
+bonsai verify --input model.json --data test.csv --engine interpret
+
 # Inspect a model's structure and statistics
 bonsai inspect --input model.json
 ```
