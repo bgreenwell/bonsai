@@ -43,6 +43,9 @@ rayon  = { version = "1.10",    optional = true }
 [features]
 default = []
 scorer  = ["polars", "rayon"]
+# Benches include! generated model sources that only exist after running the
+# fixture/example generation scripts, so they are opt-in.
+bench-models = []
 
 [build-dependencies]
 prost-build = "0.12"
@@ -55,10 +58,17 @@ ndarray = "0.17"
 [[bench]]
 name = "inference"
 harness = false
+required-features = ["bench-models"]
 
 [[bench]]
 name = "xgboost"
 harness = false
+required-features = ["bench-models"]
+
+[[bench]]
+name = "catboost"
+harness = false
+required-features = ["bench-models"]
 
 [[bin]]
 name = "bonsai"

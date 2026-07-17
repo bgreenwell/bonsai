@@ -41,7 +41,7 @@ cargo run -- transpile \
 ### 3. Run Rust benchmarks
 
 ```bash
-cargo bench --bench xgboost
+cargo bench --features bench-models --bench xgboost
 ```
 
 Criterion results are written to `target/criterion/xgboost_binary_classification/`.
@@ -59,7 +59,7 @@ Criterion results are written to `target/criterion/xgboost_binary_classification
 > amortises almost perfectly over large batches. ONNX Runtime is faster
 > for single-row serving but scales linearly (no SIMD batching in this model).
 
-### Rust side (`cargo bench --bench xgboost`)
+### Rust side (`cargo bench --features bench-models --bench xgboost`)
 
 | Method | Single row | Throughput (batch 1000) |
 |--------|-----------|-------------------------|
