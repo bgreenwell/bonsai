@@ -194,15 +194,19 @@ pub enum SplitKind {
 
 ## Testing
 
-### Unit Tests (58 passing)
+### Unit Tests (100+ passing)
 
 - `ir.rs`: node traversal, aggregation, post-transforms, missing direction, categoricals, **oblivious detection**
 - `backends/rust.rs`: code generation for identity, logit, softmax, **oblivious fast-path, batch API**
-- `frontends/xgboost.rs`: tree structure, NaN routing, base_score logit conversion, multiclass
-- `frontends/lightgbm.rs`: tree structure, NaN routing, multiclass, numeric threshold as JSON number
+- `backends/rust_array.rs`: array-layout flattening, layout resolution, no_std output, plus rustc-compiled differential tests requiring bit-identical output across layouts
+- `interpreter.rs`: split/missing-direction semantics, plus seeded fuzz tests comparing the interpreter against both compiled layouts bit-for-bit
+- `frontends/xgboost.rs`: tree structure, NaN routing, base_score logit conversion, multiclass, DART weight_drop, unsupported-model rejection
+- `frontends/lightgbm.rs`: tree structure, NaN routing, multiclass, objective mapping (log-link, ranking, rejected transforms)
+- `frontends/catboost.rs`: minimal/CTR model parsing, malformed-input rejection
 - `parsers/tree_parser.rs`: H2O MOJO binary format parsing
+- `verify.rs` / `emit_crate.rs`: CSV contract parsing, crate-name sanitization; end-to-end tests in `tests/` drive the actual binary
 
-### Integration Tests (12/16 passing)
+### Integration Tests (13 non-H2O scenarios passing in CI; H2O MOJO needs a local Java runtime)
 
 Each test: transpile model → compile with rustc → score CSV → compare against Python ground truth.
 
@@ -239,7 +243,12 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 - [x] **Benchmarking Harness**: bonsai ~137 ns/row vs ort ~3.5 µs.
 - [x] **CatBoost JSON support**: Support oblivious tree structures.
 - [x] **SIMD Optimization — Phase 1**: `predict_batch` scalar loop; enables LLVM auto-vectorization.
-- [ ] **CI Integration**: Run integration tests in GitHub Actions using pre-generated/cached assets.
+- [x] **CI Integration**: Integration tests run in GitHub Actions; fixtures regenerated via pip-installed frameworks.
+- [x] **Array code layout**: `--layout array` keeps rustc practical on very large forests (auto above 10k nodes).
+- [x] **`bonsai verify`**: transpile → compile → score → diff against reference predictions, or `--engine interpret` without rustc.
+- [x] **`--emit crate`**: full cargo crate output with baked-in golden tests.
+- [x] **`--no-std`**: core-only generated code for embedded targets.
+- [ ] **crates.io release**: publish 0.1.0.
 
 ### Mid-Term
 - [ ] **Python Bindings (PyO3)**: Generate Python-loadable modules for easy validation.
