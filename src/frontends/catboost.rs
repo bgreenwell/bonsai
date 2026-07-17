@@ -19,12 +19,19 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
 
     // Loss function location varies by CatBoost version: older exports use
     // model_info.loss_function, newer ones model_info.params.loss_function.
+    // The loss determines the output transform, so refusing to guess beats
+    // silently scoring a classifier as a regressor.
     let loss_function = model_info["loss_function"]["type"]
         .as_str()
         .or_else(|| model_info["loss_function"].as_str())
         .or_else(|| model_info["params"]["loss_function"]["type"].as_str())
         .or_else(|| model_info["params"]["loss_function"].as_str())
-        .unwrap_or("RMSE");
+        .ok_or_else(|| {
+            anyhow!(
+                "Cannot determine loss function (looked in model_info.loss_function \
+                 and model_info.params.loss_function) — malformed CatBoost JSON?"
+            )
+        })?;
 
     println!("   > loss function: {}", loss_function);
     if classes_count > 1 {
@@ -47,65 +54,21 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
     };
 
     // --- CTR metadata (only populated for models with categorical features) ---
+    // Every field feeds the CTR hash/lookup pipeline; a missing one means a
+    // malformed model and silently wrong predictions, so all are required.
     let mut ctrs = Vec::new();
     if let Some(ctrs_arr) = root["features_info"]["ctrs"].as_array() {
-        for c_val in ctrs_arr {
-            let mut elements = Vec::new();
-            if let Some(elem_arr) = c_val["elements"].as_array() {
-                for e_val in elem_arr {
-                    elements.push(CtrElement {
-                        cat_feature_index: e_val["cat_feature_index"].as_u64().unwrap_or(0)
-                            as usize,
-                        combination_element: e_val["combination_element"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                    });
-                }
-            }
-            ctrs.push(CtrInfo {
-                elements,
-                identifier: c_val["identifier"].as_str().unwrap_or("").to_string(),
-                prior_numerator: c_val["prior_numerator"].as_f64().unwrap_or(0.0),
-                // CatBoost's JSON format spells this key with the historic typo.
-                prior_denominator: c_val["prior_denomerator"].as_f64().unwrap_or(1.0),
-                scale: c_val["scale"].as_f64().unwrap_or(1.0),
-                shift: c_val["shift"].as_f64().unwrap_or(0.0),
-            });
+        for (ci, c_val) in ctrs_arr.iter().enumerate() {
+            let ctr = parse_ctr_info(c_val).with_context(|| format!("features_info.ctrs[{ci}]"))?;
+            ctrs.push(ctr);
         }
     }
 
     let mut ctr_data = HashMap::new();
     if let Some(cd_map) = root["ctr_data"].as_object() {
         for (id, val) in cd_map {
-            let stride = val["hash_stride"].as_u64().unwrap_or(1) as usize;
-            let mut hash_map: Vec<u64> = val["hash_map"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .map(|v| {
-                    if let Some(s) = v.as_str() {
-                        s.parse::<u64>().unwrap_or(0)
-                    } else {
-                        v.as_u64().unwrap_or(0)
-                    }
-                })
-                .collect();
-
-            // CatBoost JSON map might not be sorted; we need it sorted for binary search.
-            let mut chunks: Vec<Vec<u64>> =
-                hash_map.chunks_exact(stride).map(|c| c.to_vec()).collect();
-            chunks.sort_by_key(|c| c[0]);
-            hash_map = chunks.into_iter().flatten().collect();
-
-            ctr_data.insert(
-                id.clone(),
-                CtrValueTable {
-                    hash_map,
-                    hash_stride: stride,
-                    counter_denominator: val["counter_denominator"].as_i64().unwrap_or(0),
-                },
-            );
+            let table = parse_ctr_value_table(val).with_context(|| format!("ctr_data['{id}']"))?;
+            ctr_data.insert(id.clone(), table);
         }
     }
 
@@ -137,13 +100,18 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
     println!("   > {} IR trees", all_trees.len());
 
     let (scale, biases) = if let Some(sb_arr) = root["scale_and_bias"].as_array() {
-        let scale = sb_arr[0].as_f64().unwrap_or(1.0);
+        let scale = sb_arr[0]
+            .as_f64()
+            .ok_or_else(|| anyhow!("scale_and_bias[0] is not a number"))?;
         let biases: Vec<f64> = sb_arr[1]
             .as_array()
-            .unwrap_or(&vec![])
+            .ok_or_else(|| anyhow!("scale_and_bias[1] is not an array"))?
             .iter()
-            .map(|v| v.as_f64().unwrap_or(0.0))
-            .collect();
+            .map(|v| {
+                v.as_f64()
+                    .ok_or_else(|| anyhow!("scale_and_bias[1] entry is not a number: {v:?}"))
+            })
+            .collect::<Result<_>>()?;
         (scale, biases)
     } else {
         (1.0, vec![0.0])
@@ -166,6 +134,88 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
         aggregation: AggregationKind::Sum,
         post_transform,
         catboost_metadata,
+    })
+}
+
+fn parse_ctr_info(c_val: &Value) -> Result<CtrInfo> {
+    let mut elements = Vec::new();
+    let elem_arr = c_val["elements"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing 'elements' array"))?;
+    for (ei, e_val) in elem_arr.iter().enumerate() {
+        elements.push(CtrElement {
+            cat_feature_index: e_val["cat_feature_index"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("elements[{ei}]: missing 'cat_feature_index'"))?
+                as usize,
+            combination_element: e_val["combination_element"]
+                .as_str()
+                .ok_or_else(|| anyhow!("elements[{ei}]: missing 'combination_element'"))?
+                .to_string(),
+        });
+    }
+
+    let req_f64 = |key: &str| {
+        c_val[key]
+            .as_f64()
+            .ok_or_else(|| anyhow!("missing '{key}'"))
+    };
+    Ok(CtrInfo {
+        elements,
+        identifier: c_val["identifier"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing 'identifier'"))?
+            .to_string(),
+        prior_numerator: req_f64("prior_numerator")?,
+        // CatBoost's JSON format spells this key with the historic typo.
+        prior_denominator: req_f64("prior_denomerator")?,
+        scale: req_f64("scale")?,
+        shift: req_f64("shift")?,
+    })
+}
+
+fn parse_ctr_value_table(val: &Value) -> Result<CtrValueTable> {
+    let stride = val["hash_stride"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("missing 'hash_stride'"))? as usize;
+    anyhow::ensure!(
+        stride >= 2,
+        "hash_stride must be at least 2 (hash + value), got {stride}"
+    );
+
+    // Hashes are serialized as strings (u64 exceeds JSON's safe integer
+    // range), counts as numbers; accept both but reject anything else.
+    let mut hash_map: Vec<u64> = val["hash_map"]
+        .as_array()
+        .ok_or_else(|| anyhow!("missing 'hash_map' array"))?
+        .iter()
+        .map(|v| {
+            if let Some(s) = v.as_str() {
+                s.parse::<u64>()
+                    .map_err(|_| anyhow!("invalid hash_map entry '{s}'"))
+            } else {
+                v.as_u64()
+                    .ok_or_else(|| anyhow!("invalid hash_map entry {v:?}"))
+            }
+        })
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(
+        hash_map.len().is_multiple_of(stride),
+        "hash_map length ({}) is not a multiple of hash_stride ({stride})",
+        hash_map.len()
+    );
+
+    // CatBoost JSON map might not be sorted; we need it sorted for binary search.
+    let mut chunks: Vec<Vec<u64>> = hash_map.chunks_exact(stride).map(|c| c.to_vec()).collect();
+    chunks.sort_by_key(|c| c[0]);
+    hash_map = chunks.into_iter().flatten().collect();
+
+    Ok(CtrValueTable {
+        hash_map,
+        hash_stride: stride,
+        counter_denominator: val["counter_denominator"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("missing 'counter_denominator'"))?,
     })
 }
 
@@ -295,5 +345,110 @@ fn build_oblivious_node(splits: &[CatboostSplit], leaf_values: &[f64]) -> Node {
         left_child: Box::new(build_oblivious_node(remaining_splits, left_half)),
         right_child: Box::new(build_oblivious_node(remaining_splits, right_half)),
         missing_direction: MissingDirection::None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL_JSON: &str = r#"{
+      "model_info": {"params": {"loss_function": {"type": "RMSE"}}},
+      "oblivious_trees": [{
+        "splits": [{"split_type": "FloatFeature", "float_feature_index": 0, "border": 0.5}],
+        "leaf_values": [1.0, 2.0]
+      }],
+      "features_info": {}
+    }"#;
+
+    const CTR_JSON: &str = r#"{
+      "model_info": {"params": {"loss_function": {"type": "RMSE"}}},
+      "oblivious_trees": [{
+        "splits": [{"split_type": "OnlineCtr", "split_index": 0, "border": 0.5}],
+        "leaf_values": [1.0, 2.0]
+      }],
+      "features_info": {"ctrs": [{
+        "elements": [{"cat_feature_index": 0, "combination_element": "cat_feature_value"}],
+        "identifier": "id1",
+        "prior_numerator": 0.0,
+        "prior_denomerator": 1.0,
+        "scale": 1.0,
+        "shift": 0.0
+      }]},
+      "ctr_data": {"id1": {"hash_map": ["123", 1, 2], "hash_stride": 3, "counter_denominator": 0}}
+    }"#;
+
+    fn parse_str(json: &str) -> Result<Forest> {
+        let root: Value = serde_json::from_str(json).unwrap();
+        parse_json(&root)
+    }
+
+    #[test]
+    fn test_minimal_model_parses() {
+        let forest = parse_str(MINIMAL_JSON).unwrap();
+        assert_eq!(forest.trees.len(), 1);
+        assert_eq!(forest.post_transform, PostTransform::Identity);
+        assert!(forest.catboost_metadata.is_none());
+    }
+
+    #[test]
+    fn test_ctr_model_parses() {
+        let forest = parse_str(CTR_JSON).unwrap();
+        let meta = forest.catboost_metadata.expect("expected CTR metadata");
+        assert_eq!(meta.ctrs.len(), 1);
+        assert_eq!(meta.ctr_data["id1"].hash_stride, 3);
+    }
+
+    #[test]
+    fn test_missing_loss_function_errors() {
+        let json = MINIMAL_JSON.replace(
+            r#"{"params": {"loss_function": {"type": "RMSE"}}}"#,
+            r#"{"params": {}}"#,
+        );
+        let err = parse_str(&json).unwrap_err().to_string();
+        assert!(err.contains("loss function"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_missing_ctr_prior_errors() {
+        let json = CTR_JSON.replace(r#""prior_numerator": 0.0,"#, "");
+        let err = format!("{:#}", parse_str(&json).unwrap_err());
+        assert!(err.contains("prior_numerator"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_invalid_hash_map_entry_errors() {
+        let json = CTR_JSON.replace(
+            r#""hash_map": ["123", 1, 2]"#,
+            r#""hash_map": ["oops", 1, 2]"#,
+        );
+        let err = format!("{:#}", parse_str(&json).unwrap_err());
+        assert!(err.contains("hash_map"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_invalid_hash_stride_errors() {
+        for (from, to) in [
+            (r#""hash_stride": 3"#, r#""hash_stride": 1"#),
+            (r#""hash_stride": 3"#, r#""hash_stride": 2"#),
+        ] {
+            let json = CTR_JSON.replace(from, to);
+            let err = format!("{:#}", parse_str(&json).unwrap_err());
+            assert!(err.contains("hash_stride"), "unexpected error: {err}");
+        }
+    }
+
+    #[test]
+    fn test_malformed_scale_and_bias_errors() {
+        let json = MINIMAL_JSON.replace(
+            r#""features_info": {}"#,
+            r#""features_info": {}, "scale_and_bias": ["bad", [0.0]]"#,
+        );
+        let err = parse_str(&json).unwrap_err().to_string();
+        assert!(err.contains("scale_and_bias"), "unexpected error: {err}");
     }
 }
