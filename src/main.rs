@@ -3,6 +3,7 @@ mod frontends;
 mod inspector;
 mod ir;
 mod parsers;
+mod verify;
 
 /// Generated ONNX protobuf bindings (produced by prost-build from src/proto/onnx.proto).
 #[allow(clippy::doc_overindented_list_items)]
@@ -50,6 +51,27 @@ enum Commands {
         no_std: bool,
     },
 
+    /// Verify a model end to end: transpile, compile with rustc, score a
+    /// CSV, and compare against reference predictions
+    Verify {
+        /// Path to the input model file
+        #[arg(short, long, value_name = "FILE")]
+        input: PathBuf,
+
+        /// CSV with feature columns plus ground_truth (scalar) or
+        /// ground_truth_proba_<c> (multiclass) reference columns
+        #[arg(short, long, value_name = "FILE")]
+        data: PathBuf,
+
+        /// Maximum absolute difference tolerated per prediction
+        #[arg(short, long, default_value_t = 1e-5)]
+        tolerance: f32,
+
+        /// Code layout to verify
+        #[arg(long, value_enum, default_value_t = LayoutArg::Auto)]
+        layout: LayoutArg,
+    },
+
     /// Inspect a model's structure and metadata
     Inspect {
         /// Path to the input model file (.zip for H2O MOJO, .onnx or .pb for ONNX, .json for XGBoost/LightGBM)
@@ -94,12 +116,30 @@ fn main() -> anyhow::Result<()> {
             layout,
             no_std,
         } => transpile_command(input, output, layout.into(), no_std),
+        Commands::Verify {
+            input,
+            data,
+            tolerance,
+            layout,
+        } => verify_command(input, data, tolerance, layout.into()),
         Commands::Inspect {
             input,
             trees,
             num_trees,
         } => inspect_command(input, trees, num_trees),
     }
+}
+
+fn verify_command(
+    input: PathBuf,
+    data: PathBuf,
+    tolerance: f32,
+    layout: backends::rust::Layout,
+) -> anyhow::Result<()> {
+    println!("🔍 bonsai verify: {:?} against {:?}", input, data);
+    let forest = parse_model(&input)?;
+    println!("   > {} trees in forest", forest.trees.len());
+    verify::run(&forest, &data, tolerance, layout)
 }
 
 fn transpile_command(
