@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clear errors for unsupported models: XGBoost gblinear, native categorical splits, multi-output; LightGBM multiclassova and cross_entropy_lambda.
 - `--no-std` flag generating core-only code for embedded targets (softmax models expose `predict_proba_into`; exp goes through libm).
 - `bonsai verify` subcommand: transpile, compile, score a CSV, and diff against reference predictions in one step.
+- Provenance header in generated code (bonsai version, source file hash, codegen settings).
+- `--emit crate` mode producing a full cargo crate, with golden tests baked in when `--data` is given.
 
 ### Changed
 - CatBoost frontend now rejects malformed models (missing loss function, CTR fields, or scale/bias) instead of substituting defaults.
