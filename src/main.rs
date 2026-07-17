@@ -1,4 +1,5 @@
 mod backends;
+mod emit_crate;
 mod frontends;
 mod inspector;
 mod ir;
@@ -49,6 +50,19 @@ enum Commands {
         /// non-identity transforms call exp via the libm crate
         #[arg(long)]
         no_std: bool,
+
+        /// Output a single .rs file or a complete cargo crate directory
+        #[arg(long, value_enum, default_value_t = EmitArg::File)]
+        emit: EmitArg,
+
+        /// CSV of rows and reference predictions to bake into the crate as
+        /// a golden test (crate mode only; same format as `bonsai verify`)
+        #[arg(long, value_name = "FILE")]
+        data: Option<PathBuf>,
+
+        /// Tolerance for the baked golden test
+        #[arg(long, default_value_t = 1e-5)]
+        tolerance: f32,
     },
 
     /// Verify a model end to end: transpile, compile with rustc, score a
@@ -96,6 +110,12 @@ enum LayoutArg {
     Array,
 }
 
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+enum EmitArg {
+    File,
+    Crate,
+}
+
 impl From<LayoutArg> for backends::rust::Layout {
     fn from(arg: LayoutArg) -> Self {
         match arg {
@@ -115,7 +135,10 @@ fn main() -> anyhow::Result<()> {
             output,
             layout,
             no_std,
-        } => transpile_command(input, output, layout.into(), no_std),
+            emit,
+            data,
+            tolerance,
+        } => transpile_command(input, output, layout.into(), no_std, emit, data, tolerance),
         Commands::Verify {
             input,
             data,
@@ -147,7 +170,14 @@ fn transpile_command(
     output: PathBuf,
     layout: backends::rust::Layout,
     no_std: bool,
+    emit: EmitArg,
+    data: Option<PathBuf>,
+    tolerance: f32,
 ) -> anyhow::Result<()> {
+    if emit == EmitArg::File && data.is_some() {
+        anyhow::bail!("--data only applies to --emit crate");
+    }
+
     println!("🌱 bonsai: converting {:?}", input);
 
     let forest = parse_model(&input)?;
@@ -172,8 +202,22 @@ fn transpile_command(
     println!("   > generated {} bytes of Rust source", rust_code.len());
 
     // --- Write output ---
-    std::fs::write(&output, &rust_code)?;
-    println!("✓ output written to {:?}", output);
+    match emit {
+        EmitArg::File => {
+            std::fs::write(&output, &rust_code)?;
+            println!("✓ output written to {:?}", output);
+        }
+        EmitArg::Crate => {
+            emit_crate::write(
+                &forest,
+                &rust_code,
+                no_std,
+                &output,
+                data.as_deref(),
+                tolerance,
+            )?;
+        }
+    }
 
     Ok(())
 }

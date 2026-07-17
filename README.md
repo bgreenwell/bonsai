@@ -44,6 +44,14 @@ bonsai inspect --input model.json
 The verify CSV holds the feature columns plus a `ground_truth` column
 (scalar models) or `ground_truth_proba_<c>` columns (multiclass).
 
+To ship the model as a library instead of a bare source file, emit a full
+cargo crate; with `--data` the reference predictions are baked in as a
+`cargo test`-runnable golden test:
+
+```bash
+bonsai transpile --input model.json --output scorer/ --emit crate --data test.csv
+```
+
 Very large forests (above ~10k nodes) automatically use a flattened array
 layout that keeps rustc compile times low; override with
 `--layout {auto,ifelse,array}`.

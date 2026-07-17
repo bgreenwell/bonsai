@@ -154,13 +154,13 @@ pub fn run(forest: &Forest, data_path: &Path, tolerance: f32, layout: Layout) ->
 }
 
 #[derive(Debug)]
-struct ParsedData {
-    rows: Vec<Vec<f32>>,
-    references: Vec<Vec<f32>>,
-    n_features: usize,
+pub(crate) struct ParsedData {
+    pub(crate) rows: Vec<Vec<f32>>,
+    pub(crate) references: Vec<Vec<f32>>,
+    pub(crate) n_features: usize,
 }
 
-fn parse_csv(content: &str, n_classes: usize) -> Result<ParsedData> {
+pub(crate) fn parse_csv(content: &str, n_classes: usize) -> Result<ParsedData> {
     let mut lines = content.lines();
     let header: Vec<&str> = lines
         .next()
