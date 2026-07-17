@@ -36,7 +36,7 @@ serde_json = "1.0"
 # Scratch dirs for `bonsai verify` compile-and-score runs
 tempfile = "3"
 
-# Scorer — optional, heavy
+# Scorer - optional, heavy
 polars = { version = "0.37", features = ["lazy", "parquet", "csv"], optional = true }
 rayon  = { version = "1.10",    optional = true }
 

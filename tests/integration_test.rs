@@ -68,14 +68,14 @@ fn run_test_case_tol(test_dir: &str, has_categoricals: bool, tolerance: f32) {
         );
     }
     assert!(generated_code.contains("pub struct Model"));
-    // proc_macro2::to_string() spaces tokens — check both name and return type separately
+    // proc_macro2::to_string() spaces tokens - check both name and return type separately
     assert!(generated_code.contains("pub fn predict"));
     assert!(
         generated_code.contains("-> f32"),
         "predict should return f32"
     );
 
-    // 3. Load metadata — needed for categorical level → index encoding
+    // 3. Load metadata - needed for categorical level → index encoding
     let metadata: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(&metadata_path).expect("generated/metadata.json not found"),
     )
@@ -279,7 +279,7 @@ fn run_harness(
             binary_path.to_str().unwrap(),
         ])
         .output()
-        .expect("rustc not found — is the Rust toolchain installed?");
+        .expect("rustc not found - is the Rust toolchain installed?");
     assert!(
         compile.status.success(),
         "rustc failed to compile generated model:\n{}",
@@ -498,7 +498,7 @@ fn run_multiclass_test_case_tol(test_dir: &str, tolerance: f32) {
 }
 
 // ---------------------------------------------------------------------------
-// Test cases — all #[ignore] because they require Python-generated model assets
+// Test cases - all #[ignore] because they require Python-generated model assets
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -534,7 +534,7 @@ fn test_sklearn_onnx_classification_numeric() {
 #[test]
 #[ignore]
 fn test_sklearn_onnx_classification_categorical() {
-    // sklearn ONNX label-encodes categoricals to numeric — no bitset helper expected
+    // sklearn ONNX label-encodes categoricals to numeric - no bitset helper expected
     run_test_case("sklearn_onnx/classification_categorical", false);
 }
 
@@ -547,7 +547,7 @@ fn test_sklearn_onnx_regression_numeric() {
 #[test]
 #[ignore]
 fn test_sklearn_onnx_regression_categorical() {
-    // sklearn ONNX label-encodes categoricals to numeric — no bitset helper expected
+    // sklearn ONNX label-encodes categoricals to numeric - no bitset helper expected
     run_test_case("sklearn_onnx/regression_categorical", false);
 }
 

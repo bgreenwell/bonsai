@@ -1,6 +1,6 @@
 /// Benchmark: bonsai vs ONNX Runtime (ort) for XGBoost binary classification.
 ///
-/// Prerequisites — run once before `cargo bench`:
+/// Prerequisites - run once before `cargo bench`:
 ///   cd examples/xgboost_benchmark
 ///   uv venv && uv pip install -r requirements.txt
 ///   uv run python generate.py
@@ -33,13 +33,13 @@ fn bench_bonsai(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("xgboost_binary_classification");
 
-    // Single-row latency — the primary online-serving metric
+    // Single-row latency - the primary online-serving metric
     group.throughput(Throughput::Elements(1));
     group.bench_function("bonsai/single", |b| {
         b.iter(|| model.predict(black_box(&features)))
     });
 
-    // Batch throughput — loop over N rows (Phase 1 scalar baseline;
+    // Batch throughput - loop over N rows (Phase 1 scalar baseline;
     // Phase 2 will replace this with model.predict_batch once implemented)
     for batch_size in [10usize, 100, 1_000] {
         let batch: Vec<f32> = SAMPLE
@@ -102,7 +102,7 @@ fn bench_ort(c: &mut Criterion) {
         })
     });
 
-    // Batch throughput — single session.run call with N rows
+    // Batch throughput - single session.run call with N rows
     for batch_size in [10usize, 100, 1_000] {
         let batch: Vec<f32> = SAMPLE
             .iter()

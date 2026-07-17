@@ -201,7 +201,7 @@ def save_test_data_multiclass(
     Args:
         X_test: Test features (numeric only)
         y_test: Integer class labels
-        proba_matrix: Shape (n_samples, n_classes) — per-class probabilities
+        proba_matrix: Shape (n_samples, n_classes) - per-class probabilities
         output_path: Path to save CSV file
     """
     n_numeric = X_test.shape[1]

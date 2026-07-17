@@ -44,7 +44,7 @@ OUT.mkdir(exist_ok=True)
 # ---------------------------------------------------------------------------
 
 print("=" * 68)
-print("XGBoost Benchmark — Binary Classification (10 numeric features)")
+print("XGBoost Benchmark - Binary Classification (10 numeric features)")
 print("=" * 68)
 
 print("\n[1/5] Generating synthetic data ...")
@@ -84,12 +84,12 @@ print(f"   {N_TREES} trees, depth {MAX_DEPTH}")
 
 print("\n[3/5] Exporting model ...")
 
-# JSON — consumed by bonsai
+# JSON - consumed by bonsai
 json_path = OUT / "model.json"
 clf.get_booster().save_model(str(json_path))
 print(f"   ✓ JSON  → {json_path}")
 
-# ONNX — consumed by onnxruntime / ort crate
+# ONNX - consumed by onnxruntime / ort crate
 # onnxmltools has a dedicated XGBoost converter that produces a TreeEnsemble ONNX
 # model with output[0]=labels (int64) and output[1]=probabilities (float32, shape [N,2]).
 onnx_path = OUT / "model.onnx"
@@ -131,7 +131,7 @@ with open(OUT / "metadata.json", "w") as f:
 
 print("\n[4/5] Benchmarking Python inference ...")
 
-# Use a single representative row — first test sample
+# Use a single representative row - first test sample
 sample_row = X_test[:1]  # shape (1, N_FEATURES)
 booster = clf.get_booster()
 dmat_single = xgb.DMatrix(sample_row)

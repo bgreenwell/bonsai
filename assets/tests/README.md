@@ -1,6 +1,6 @@
 # Bonsai Test Suite
 
-Comprehensive integration tests for validating bonsai model transpilation across different formats and feature types.
+Integration tests validating bonsai model transpilation across different formats and feature types.
 
 ## Structure
 
@@ -32,20 +32,20 @@ tests/
 
 | Format | Task | Features | Status |
 |--------|------|----------|--------|
-| H2O MOJO | Classification | Numeric only | ✅ Implemented |
+| H2O MOJO | Classification | Numeric only | Implemented |
 | H2O MOJO | Classification | + Categorical | 🔲 Template ready |
 | H2O MOJO | Regression | Numeric only | 🔲 Template ready |
-| H2O MOJO | Regression | + Categorical | ✅ Implemented |
+| H2O MOJO | Regression | + Categorical | Implemented |
 | sklearn ONNX | Classification | Numeric only | 🔲 Template ready |
 | sklearn ONNX | Classification | + Categorical | 🔲 Template ready |
 | sklearn ONNX | Regression | Numeric only | 🔲 Template ready |
 | sklearn ONNX | Regression | + Categorical | 🔲 Template ready |
-| XGBoost | Classification | Numeric only | ✅ Implemented |
-| XGBoost | Regression | Numeric only | ✅ Implemented |
-| LightGBM | Classification | Numeric only | ✅ Implemented |
-| LightGBM | Regression | Numeric only | ✅ Implemented |
-| CatBoost | Regression | Numeric only | ✅ Implemented |
-| CatBoost | Multiclass | Numeric only | ✅ Implemented |
+| XGBoost | Classification | Numeric only | Implemented |
+| XGBoost | Regression | Numeric only | Implemented |
+| LightGBM | Classification | Numeric only | Implemented |
+| LightGBM | Regression | Numeric only | Implemented |
+| CatBoost | Regression | Numeric only | Implemented |
+| CatBoost | Multiclass | Numeric only | Implemented |
 
 ## Running Tests
 

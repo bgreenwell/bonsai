@@ -6,7 +6,7 @@ use serde_json::Value;
 pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
     let learner = root
         .get("learner")
-        .ok_or_else(|| anyhow!("Missing 'learner' key — not an XGBoost JSON model"))?;
+        .ok_or_else(|| anyhow!("Missing 'learner' key - not an XGBoost JSON model"))?;
 
     // --- Model-level parameters ---
     let model_param = &learner["learner_model_param"];

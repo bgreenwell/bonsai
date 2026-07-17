@@ -5,7 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
     root.get("tree_info")
-        .ok_or_else(|| anyhow!("Missing 'tree_info' key — not a LightGBM JSON model"))?;
+        .ok_or_else(|| anyhow!("Missing 'tree_info' key - not a LightGBM JSON model"))?;
 
     // --- Model-level parameters ---
     let num_tree_per_iteration: usize =
@@ -332,7 +332,7 @@ mod tests {
       ]
     }"#;
 
-    // Threshold as JSON number (not string) — some LightGBM versions emit this
+    // Threshold as JSON number (not string) - some LightGBM versions emit this
     const NUMERIC_THRESHOLD_JSON: &str = r#"{
       "name": "tree",
       "num_class": 1,

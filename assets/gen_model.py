@@ -27,4 +27,4 @@ output_path = "generated/model.onnx"
 with open(output_path, "wb") as f:
     f.write(onx.SerializeToString())
 
-print(f"✅ Generated '{output_path}' with {len(clf.estimators_)} trees.")
+print(f"Generated '{output_path}' with {len(clf.estimators_)} trees.")

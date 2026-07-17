@@ -1,6 +1,6 @@
 # Bonsai: Tree Ensemble Transpiler
 
-**Mission:** Convert trained tree-based ML models (Random Forests, GBMs) into standalone, zero-dependency Rust code for ultra-low latency inference.
+**Mission:** Convert trained tree-based ML models (Random Forests, GBMs) into standalone, zero-dependency Rust code for low-latency inference.
 
 ---
 
@@ -23,7 +23,7 @@ bonsai/
 ├── src/
 │   ├── main.rs             # CLI: parse args, orchestrate pipeline
 │   ├── ir.rs               # Intermediate representation (Forest, Node, etc.)
-│   ├── inspector.rs        # `bonsai inspect` — human-readable model summary
+│   ├── inspector.rs        # `bonsai inspect` - human-readable model summary
 │   │
 │   ├── frontends/          # Format-specific ingest + parse
 │   │   ├── mod.rs          # Frontend trait definition
@@ -68,37 +68,37 @@ bonsai/
 
 | Format | Notes |
 |--------|-------|
-| ✅ **H2O MOJO** (v1.40+) | GBM, DRF; Binomial + Gaussian distributions |
-| ✅ **ONNX** | `TreeEnsembleRegressor` + `TreeEnsembleClassifier` operators |
-| ✅ **XGBoost JSON** | `booster.save_model("model.json")` |
-| ✅ **LightGBM JSON** | `booster.dump_model()` |
-| ✅ **CatBoost JSON** | `model.save_model("model.json", format="json")`; oblivious trees |
+| **H2O MOJO** (v1.40+) | GBM, DRF; Binomial + Gaussian distributions |
+| **ONNX** | `TreeEnsembleRegressor` + `TreeEnsembleClassifier` operators |
+| **XGBoost JSON** | `booster.save_model("model.json")` |
+| **LightGBM JSON** | `booster.dump_model()` |
+| **CatBoost JSON** | `model.save_model("model.json", format="json")`; oblivious trees |
 
 ### Supported ML Tasks
 
 | Task | Post-Transform |
 |------|---------------|
-| ✅ Regression | `Identity` or `Log` |
-| ✅ Binary classification | `Logit` (sigmoid) |
-| ✅ Multiclass classification | `Softmax { n_classes }` |
+| Regression | `Identity` or `Log` |
+| Binary classification | `Logit` (sigmoid) |
+| Multiclass classification | `Softmax { n_classes }` |
 
 ### Supported Tree Features
 
-- ✅ **Numeric splits**: Threshold-based (`<`, `<=`, `>`, `>=`, `==`, `!=`)
-- ✅ **Categorical splits**: Bitset-encoded set membership (H2O MOJO / ONNX)
-- ✅ **Missing value handling**: `Left`, `Right`, `NaVsRest`, `None`
-- ✅ **Aggregation**: `Sum` (GBM) and `Average` (DRF / RF)
-- ✅ **Base score / intercept**: Preserved in f64
-- ✅ **Oblivious Trees**: Symmetric structure optimization (CatBoost)
+- **Numeric splits**: Threshold-based (`<`, `<=`, `>`, `>=`, `==`, `!=`)
+- **Categorical splits**: Bitset-encoded set membership (H2O MOJO / ONNX)
+- **Missing value handling**: `Left`, `Right`, `NaVsRest`, `None`
+- **Aggregation**: `Sum` (GBM) and `Average` (DRF / RF)
+- **Base score / intercept**: Preserved in f64
+- **Oblivious Trees**: Symmetric structure optimization (CatBoost)
 
 ### Code Generation
 
-- ✅ **Zero dependencies**: Generated Rust has no runtime deps
-- ✅ **Inline tree functions**: `#[inline(always)] fn tree_N(features: &[f32]) -> f64`
-- ✅ **f64 aggregation, f32 output**: `predict` returns `f32`; internal accumulation in `f64`
-- ✅ **Batch API**: `predict_batch` and `predict_proba_batch` for high-throughput scoring
-- ✅ **Conditional helpers**: `bitset_contains()` emitted only when categoricals are present
-- ✅ **Multiclass output**: `predict_proba(&self, features: &[f32]) -> Vec<f32>`
+- **Zero dependencies**: Generated Rust has no runtime deps
+- **Inline tree functions**: `#[inline(always)] fn tree_N(features: &[f32]) -> f64`
+- **f64 aggregation, f32 output**: `predict` returns `f32`; internal accumulation in `f64`
+- **Batch API**: `predict_batch` and `predict_proba_batch` for high-throughput scoring
+- **Conditional helpers**: `bitset_contains()` emitted only when categoricals are present
+- **Multiclass output**: `predict_proba(&self, features: &[f32]) -> Vec<f32>`
 
 ---
 
@@ -152,28 +152,28 @@ pub enum SplitKind {
 
 ### Frontend (Ingest + Parse)
 
-**`frontends/catboost.rs`** — CatBoost JSON:
+**`frontends/catboost.rs`** - CatBoost JSON:
 - Parses `oblivious_trees` with symmetric structure
 - Maps leaf values to a flat array for bitmasked indexing
 - Supports `Logloss` (Binary) and `RMSE` (Regression)
 
-**`frontends/mojo.rs`** — H2O MOJO (`.zip`):
+**`frontends/mojo.rs`** - H2O MOJO (`.zip`):
 - Parses `model.ini` for metadata (algo, distribution, link function)
 - Extracts tree binaries (`trees/t00_XXX.bin` + `_aux.bin`)
 - Calls `parsers/tree_parser.rs` for each tree
 
-**`frontends/onnx.rs`** — ONNX (`.onnx`):
+**`frontends/onnx.rs`** - ONNX (`.onnx`):
 - Decodes protobuf via `prost`
 - Extracts `TreeEnsembleRegressor` / `TreeEnsembleClassifier`
 - Handles per-node `missing_value_tracks_true` flag
 - Populates leaves from `target_weights` (regressor) or `class_weights` (classifier)
 
-**`frontends/xgboost.rs`** — XGBoost JSON (`.json`):
+**`frontends/xgboost.rs`** - XGBoost JSON (`.json`):
 - Strips XGBoost 3.x bracket notation from `base_score`
 - Applies logit to `base_score` when it is in probability space
 - Flat parallel array format: `left_children`, `right_children`, `split_indices`, etc.
 
-**`frontends/lightgbm.rs`** — LightGBM JSON (`.json`):
+**`frontends/lightgbm.rs`** - LightGBM JSON (`.json`):
 - Handles both string and array objective formats
 - Recursive `tree_structure` node format
 - Threshold encoded as string or number depending on version
@@ -212,17 +212,17 @@ Each test: transpile model → compile with rustc → score CSV → compare agai
 
 | Test | Status | Tolerance |
 |------|--------|-----------|
-| `catboost/regression` | ✅ | 1e-5 |
-| `xgboost/regression_numeric` | ✅ | 1e-4 |
-| `xgboost/classification_numeric` | ✅ | 1e-5 |
-| `xgboost/classification_multiclass` | ✅ | 1e-4 |
-| `lightgbm/regression_numeric` | ✅ | 1e-5 |
-| `lightgbm/classification_numeric` | ✅ | 1e-5 |
-| `lightgbm/classification_multiclass` | ✅ | 1e-5 |
-| `sklearn_onnx/regression_numeric` | ✅ | 1e-5 |
-| `sklearn_onnx/regression_categorical` | ✅ | 1e-5 |
-| `sklearn_onnx/classification_numeric` | ✅ | 1e-5 |
-| `sklearn_onnx/classification_categorical` | ✅ | 1e-5 |
+| `catboost/regression` | | 1e-5 |
+| `xgboost/regression_numeric` | | 1e-4 |
+| `xgboost/classification_numeric` | | 1e-5 |
+| `xgboost/classification_multiclass` | | 1e-4 |
+| `lightgbm/regression_numeric` | | 1e-5 |
+| `lightgbm/classification_numeric` | | 1e-5 |
+| `lightgbm/classification_multiclass` | | 1e-5 |
+| `sklearn_onnx/regression_numeric` | | 1e-5 |
+| `sklearn_onnx/regression_categorical` | | 1e-5 |
+| `sklearn_onnx/classification_numeric` | | 1e-5 |
+| `sklearn_onnx/classification_categorical` | | 1e-5 |
 | `h2o_mojo/*` (4 tests) | ⏭ | Require Java to generate model files |
 
 Run with: `cargo test --test integration_test -- --include-ignored`
@@ -242,7 +242,7 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 ### Near-Term
 - [x] **Benchmarking Harness**: bonsai ~137 ns/row vs ort ~3.5 µs.
 - [x] **CatBoost JSON support**: Support oblivious tree structures.
-- [x] **SIMD Optimization — Phase 1**: `predict_batch` scalar loop; enables LLVM auto-vectorization.
+- [x] **SIMD Optimization - Phase 1**: `predict_batch` scalar loop; enables LLVM auto-vectorization.
 - [x] **CI Integration**: Integration tests run in GitHub Actions; fixtures regenerated via pip-installed frameworks.
 - [x] **Array code layout**: `--layout array` keeps rustc practical on very large forests (auto above 10k nodes).
 - [x] **`bonsai verify`**: transpile → compile → score → diff against reference predictions, or `--engine interpret` without rustc.
@@ -253,7 +253,7 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 ### Mid-Term
 - [ ] **Python Bindings (PyO3)**: Generate Python-loadable modules for easy validation.
 - [ ] **SHAP value computation**: Feature contributions (TreeSHAP).
-- [ ] **SIMD Optimization — Phase 2**: Oblivious tree evaluation via `std::simd` — evaluate all nodes branchlessly, `select` the leaf. Process 8–16 rows per SIMD lane. Targets trees ≤ depth 8.
+- [ ] **SIMD Optimization - Phase 2**: Oblivious tree evaluation via `std::simd` - evaluate all nodes branchlessly, `select` the leaf. Process 8–16 rows per SIMD lane. Targets trees ≤ depth 8.
 - [ ] **Batch scoring optimization**: Rayon/SIMD integration in `polars_score`.
 
 ### Long-Term
@@ -267,21 +267,21 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 ## Dependencies
 
 **Core:**
-- `anyhow` — error handling
-- `clap` — CLI argument parsing
-- `zip` — MOJO archive extraction
-- `byteorder` — little-endian binary parsing
-- `serde_json` — XGBoost / LightGBM / CatBoost JSON parsing
+- `anyhow` - error handling
+- `clap` - CLI argument parsing
+- `zip` - MOJO archive extraction
+- `byteorder` - little-endian binary parsing
+- `serde_json` - XGBoost / LightGBM / CatBoost JSON parsing
 
 **Code Generation:**
-- `proc-macro2`, `quote` — Rust token stream construction
+- `proc-macro2`, `quote` - Rust token stream construction
 
 **ONNX:**
-- `prost` — protobuf decoding (generated at build time via `build.rs`)
+- `prost` - protobuf decoding (generated at build time via `build.rs`)
 
 **Batch Scoring Binary (`polars_score`):**
-- `polars` — DataFrame I/O
-- `rayon` — parallel scoring
+- `polars` - DataFrame I/O
+- `rayon` - parallel scoring
 
 ---
 
@@ -291,6 +291,6 @@ Run with: `cargo test --test integration_test -- --include-ignored`
 - **No runtime dependencies**: Deploy anywhere (servers, edge, WASM)
 - **Explicit over implicit**: IR makes every transformation auditable
 - **Performance by default**: Inline everything; f64 accumulation, f32 output; oblivious fast-path
-- **Framework-agnostic**: H2O, ONNX, XGBoost, LightGBM, CatBoost — same IR, same backend
+- **Framework-agnostic**: H2O, ONNX, XGBoost, LightGBM, CatBoost - same IR, same backend
 
 **Train in Python/R/Java. Deploy as pure Rust.**

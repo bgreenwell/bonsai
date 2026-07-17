@@ -71,8 +71,8 @@ The generated `model.rs` exposes a `Model` struct with `predict` (scalar),
 probabilities), and, for CatBoost models with categorical features,
 `predict_cat`.
 
-For an end-to-end walkthrough — train an XGBoost model in Python, transpile
-it, and benchmark the result — see [`demo.ipynb`](demo.ipynb).
+For an end-to-end walkthrough (train an XGBoost model in Python, transpile
+it, and benchmark the result), see [`demo.ipynb`](demo.ipynb).
 
 ### Batch scoring CLI
 
@@ -98,8 +98,8 @@ Results vary with model size and hardware; run `cargo bench` to reproduce.
 
 ## Documentation
 
-- [CHANGELOG.md](CHANGELOG.md) — release history
-- [PLAN.md](PLAN.md) — architecture notes and roadmap
+- [CHANGELOG.md](CHANGELOG.md) - release history
+- [PLAN.md](PLAN.md) - architecture notes and roadmap
 
 ## Development
 

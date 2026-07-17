@@ -102,7 +102,7 @@ fn compile_and_score(
         .arg(&harness_bin)
         .arg(dir.path().join("main.rs"))
         .output()
-        .context("Failed to invoke rustc — is a Rust toolchain on PATH?")?;
+        .context("Failed to invoke rustc - is a Rust toolchain on PATH?")?;
     anyhow::ensure!(
         rustc_out.status.success(),
         "Generated code failed to compile:\n{}",
@@ -274,7 +274,7 @@ fn parse_feature(raw: &str, column: &str, lineno: usize) -> Result<f32> {
     }
     v.parse::<f32>().map_err(|_| {
         anyhow!(
-            "Row {}: column '{}' value '{}' is not numeric — verify supports \
+            "Row {}: column '{}' value '{}' is not numeric - verify supports \
              numeric features only (label-encode categoricals first)",
             lineno,
             column,

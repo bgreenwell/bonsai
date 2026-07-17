@@ -182,7 +182,7 @@ fn verify_command(
     layout: backends::rust::Layout,
     use_interpreter: bool,
 ) -> anyhow::Result<()> {
-    println!("🔍 bonsai verify: {:?} against {:?}", input, data);
+    println!("bonsai verify: {:?} against {:?}", input, data);
     let forest = parse_model(&input)?;
     println!("   > {} trees in forest", forest.trees.len());
     verify::run(&forest, &data, tolerance, layout, use_interpreter)
@@ -201,7 +201,7 @@ fn transpile_command(
         anyhow::bail!("--data only applies to --emit crate");
     }
 
-    println!("🌱 bonsai: converting {:?}", input);
+    println!("bonsai: converting {:?}", input);
 
     let forest = parse_model(&input)?;
     println!("   > {} trees in forest", forest.trees.len());
@@ -270,7 +270,7 @@ fn provenance_header(
     ))
 }
 
-/// FNV-1a 64-bit content hash — for provenance, not security.
+/// FNV-1a 64-bit content hash - for provenance, not security.
 fn fnv1a64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for &b in data {
@@ -281,7 +281,7 @@ fn fnv1a64(data: &[u8]) -> u64 {
 }
 
 fn inspect_command(input: PathBuf, show_trees: bool, num_trees: usize) -> anyhow::Result<()> {
-    println!("🔍 bonsai inspect: {:?}\n", input.display());
+    println!("bonsai inspect: {:?}\n", input.display());
 
     let forest = parse_model(&input)?;
     inspector::inspect(&forest, show_trees, num_trees);
@@ -294,7 +294,7 @@ fn detect_and_parse_json(input: &Path) -> anyhow::Result<ir::Forest> {
     let content =
         std::fs::read_to_string(input).with_context(|| format!("Failed to read {:?}", input))?;
     let root: serde_json::Value = serde_json::from_str(&content)
-        .context("Failed to parse JSON — is this a valid model file?")?;
+        .context("Failed to parse JSON - is this a valid model file?")?;
 
     if root.get("learner").is_some() {
         println!("   > Detected XGBoost JSON");

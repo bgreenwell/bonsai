@@ -78,7 +78,7 @@ impl super::Frontend for OnnxFrontend {
             .map(|a| &a.ints)
             .ok_or_else(|| anyhow!("Missing nodes_falsenodeids"))?;
 
-        // Fail fast if the model uses true ONNX categorical nodes — bonsai only handles
+        // Fail fast if the model uses true ONNX categorical nodes - bonsai only handles
         // numeric splits. H2O exports categoricals as label-encoded numeric features, so
         // this attribute is absent for models bonsai was designed to consume.
         if let Some(cat_attr) = get_attr("nodes_categorical_attributes") {
@@ -162,7 +162,7 @@ impl super::Frontend for OnnxFrontend {
             );
         }
 
-        // 6. Populate leaf values — regressor path
+        // 6. Populate leaf values - regressor path
         for i in 0..target_tree_ids.len() {
             let builder = trees_map.entry(target_tree_ids[i]).or_default();
             builder
@@ -170,7 +170,7 @@ impl super::Frontend for OnnxFrontend {
                 .insert(target_node_ids[i], target_weights[i] as f64);
         }
 
-        // 7. Populate leaf values — classifier path
+        // 7. Populate leaf values - classifier path
         //
         // class_ids, class_tree_ids, class_node_ids, class_weights are parallel arrays.
         //
@@ -306,7 +306,7 @@ struct SplitInfo {
 
 /// Recursively build an `ir::Node` tree from the flat ONNX arrays.
 fn build_recursive(node_id: i64, builder: &TreeBuilder) -> Result<Node> {
-    // Leaf check first — leaves are terminal.
+    // Leaf check first - leaves are terminal.
     if let Some(&val) = builder.leaves.get(&node_id) {
         return Ok(Node::Leaf { value: val });
     }
@@ -318,7 +318,7 @@ fn build_recursive(node_id: i64, builder: &TreeBuilder) -> Result<Node> {
         )
     })?;
 
-    // Defensive: mode == "LEAF" but no weight in leaves map — this is a malformed ONNX.
+    // Defensive: mode == "LEAF" but no weight in leaves map - this is a malformed ONNX.
     if split.mode == "LEAF" {
         anyhow::bail!(
             "Node ID {} has mode LEAF but no leaf weight was found in the ONNX model.",

@@ -1,6 +1,6 @@
 # XGBoost Benchmark
 
-Definitive comparison of all ways to score an XGBoost binary-classification model:
+Compares the common ways to score an XGBoost binary-classification model:
 
 | Method | Language | Description |
 |--------|----------|-------------|
@@ -66,7 +66,7 @@ Criterion results are written to `target/criterion/xgboost_binary_classification
 | bonsai | ~137 ns | ~7.1 Melem/s |
 | ort (Rust) | ~3.5 µs | ~2.4 Melem/s |
 
-> bonsai is **~25× faster than ort** for single-row inference — no FFI, no tensor
+> bonsai is ~25x faster than ort for single-row inference: no FFI, no tensor
 > allocation, just inlined Rust decision-tree code.
 > ort catches up somewhat at large batches (ONNX Runtime uses internal SIMD);
 > bonsai Phase 2 (oblivious SIMD codegen) is planned to close this gap.
@@ -76,4 +76,4 @@ Criterion results are written to `target/criterion/xgboost_binary_classification
 - **Phase 1** (`predict_batch`): scalar loop over rows, enables auto-vectorisation
   of the tree-score accumulation by LLVM.
 - **Phase 2** (oblivious SIMD): branchless tree evaluation using `std::simd`,
-  processing 8–16 rows per SIMD lane — expected to match or beat ort batch throughput.
+  processing 8–16 rows per SIMD lane - expected to match or beat ort batch throughput.

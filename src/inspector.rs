@@ -314,7 +314,7 @@ fn print_categorical_details(forest: &Forest) {
         println!("\nFeature {}:", feature_idx);
         println!("  Number of categorical splits: {}", infos.len());
 
-        // Analyze bitset ranges; unwraps can't fail — a feature only has a map
+        // Analyze bitset ranges; unwraps can't fail - a feature only has a map
         // entry if at least one categorical split was collected for it
         let min_bitoff = infos.iter().map(|i| i.bitoff).min().unwrap();
         let max_bitoff = infos.iter().map(|i| i.bitoff).max().unwrap();

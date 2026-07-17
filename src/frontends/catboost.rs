@@ -29,7 +29,7 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
         .ok_or_else(|| {
             anyhow!(
                 "Cannot determine loss function (looked in model_info.loss_function \
-                 and model_info.params.loss_function) — malformed CatBoost JSON?"
+                 and model_info.params.loss_function) - malformed CatBoost JSON?"
             )
         })?;
 
@@ -82,7 +82,7 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
     // Parse oblivious trees
     let trees_val = root
         .get("oblivious_trees")
-        .ok_or_else(|| anyhow!("Missing 'oblivious_trees' key — not a CatBoost JSON model"))?;
+        .ok_or_else(|| anyhow!("Missing 'oblivious_trees' key - not a CatBoost JSON model"))?;
 
     let trees_arr = trees_val
         .as_array()

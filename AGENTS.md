@@ -194,11 +194,11 @@ The if/else backend generates standalone Rust code from IR:
 ### Integration Tests
 - Located in `tests/integration_test.rs` and `assets/tests/`
 - Cover 17 scenarios across XGBoost, LightGBM, CatBoost, sklearn ONNX, and H2O MOJO
-- All are `#[ignore]` — require Python environment and pre-generated model assets
+- All are `#[ignore]` - require Python environment and pre-generated model assets
 - Regenerate all fixtures at once with `python scripts/generate_all_fixtures.py`, optionally filtered by framework (`... xgboost lightgbm catboost sklearn_onnx`)
 - CI runs the non-H2O integration tests on every push: it pip-installs the training frameworks, regenerates fixtures, and runs `cargo test --test integration_test -- --ignored --skip test_h2o`
 - Model generation scripts: `assets/tests/<format>/<scenario>/generate.py`
-- **Note:** Prediction validation is now real — it compiles the generated `model.rs` with `rustc` at test time, pipes feature rows through stdin, and asserts predictions match ground truth within a specified tolerance.
+- **Note:** Prediction validation is now real - it compiles the generated `model.rs` with `rustc` at test time, pipes feature rows through stdin, and asserts predictions match ground truth within a specified tolerance.
 
 ### Running Integration Tests
 ```bash
