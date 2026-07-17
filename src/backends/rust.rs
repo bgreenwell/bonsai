@@ -84,24 +84,56 @@ fn count_nodes(node: &Node) -> usize {
     }
 }
 
+/// Code generation options.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodegenOptions {
+    pub layout: Layout,
+    /// Emit `core`-only code: no `Vec` (softmax models expose
+    /// `predict_proba_into` instead of `predict_proba`), and `exp()` goes
+    /// through `libm` since `f64::exp` is std-only. CatBoost CTR models are
+    /// not supported in this mode.
+    pub no_std: bool,
+}
+
 /// Generate a standalone Rust source file from the given forest, choosing
-/// the layout automatically. See [`generate_with_layout`].
+/// the layout automatically. See [`generate_with_options`].
 /// The binary resolves the layout itself to report it; this wrapper is the
 /// stable entry point for tests and future library consumers.
 #[allow(dead_code)]
 pub fn generate(forest: &Forest) -> Result<String> {
-    generate_with_layout(forest, Layout::Auto)
+    generate_with_options(forest, CodegenOptions::default())
+}
+
+/// Generate with an explicit layout and default options; see
+/// [`generate_with_options`]. Like [`generate`], kept as a stable entry
+/// point for tests and library consumers.
+#[allow(dead_code)]
+pub fn generate_with_layout(forest: &Forest, layout: Layout) -> Result<String> {
+    generate_with_options(
+        forest,
+        CodegenOptions {
+            layout,
+            ..Default::default()
+        },
+    )
 }
 
 /// Generate a standalone Rust source file from the given forest using the
-/// requested layout (resolving `Auto` per [`resolve_layout`]).
-pub fn generate_with_layout(forest: &Forest, layout: Layout) -> Result<String> {
+/// requested options (resolving `Layout::Auto` per [`resolve_layout`]).
+pub fn generate_with_options(forest: &Forest, options: CodegenOptions) -> Result<String> {
     if forest.trees.is_empty() {
         anyhow::bail!("Cannot generate code for an empty forest (0 trees).");
     }
-    match resolve_layout(forest, layout)? {
-        Layout::Array => super::rust_array::generate(forest),
-        _ => generate_ifelse(forest),
+    if options.no_std {
+        anyhow::ensure!(
+            forest.catboost_metadata.is_none(),
+            "CatBoost CTR models are not supported with --no-std \
+             (CTR computation requires heap allocation)"
+        );
+    }
+    match resolve_layout(forest, options.layout)? {
+        Layout::Array => super::rust_array::generate(forest, options.no_std),
+        _ => generate_ifelse(forest, options.no_std),
     }
 }
 
@@ -113,7 +145,7 @@ pub fn generate_with_layout(forest: &Forest, layout: Layout) -> Result<String> {
 /// - A `Model` unit struct
 /// - `Model::predict(&self, features: &[f32]) -> f32`
 /// - One `#[inline(always)]` tree function per tree in the forest
-fn generate_ifelse(forest: &Forest) -> Result<String> {
+fn generate_ifelse(forest: &Forest, no_std: bool) -> Result<String> {
     // --- Conditional: bitset helper ---
     let needs_bitset = forest.trees.iter().any(|t| has_categorical(&t.root));
     let bitset_helper = if needs_bitset {
@@ -184,6 +216,7 @@ fn generate_ifelse(forest: &Forest) -> Result<String> {
             &bitset_helper,
             &catboost_helpers,
             &tree_fns,
+            no_std,
         )?;
         return Ok(output.to_string());
     }
@@ -211,7 +244,7 @@ fn generate_ifelse(forest: &Forest) -> Result<String> {
         }
     };
 
-    let post_transform_expr = post_transform_expr(&forest.post_transform);
+    let post_transform_expr = post_transform_expr(&forest.post_transform, no_std);
 
     let (predict_cat_method, internal_predict_call) = if forest.catboost_metadata.is_some() {
         (
@@ -524,18 +557,29 @@ fn build_catboost_helpers(meta: &CatboostMetadata) -> Result<TokenStream> {
 // Node compilation
 // ---------------------------------------------------------------------------
 
-/// Recursively compile an IR node into a token stream of nested if/else blocks.
+/// `exp(arg)` as a token stream. `f64::exp` lives in std; no_std code goes
+/// through `libm`, which the consuming crate must then depend on.
+pub(crate) fn exp_expr(arg: TokenStream, no_std: bool) -> TokenStream {
+    if no_std {
+        quote! { libm::exp(#arg) }
+    } else {
+        quote! { (#arg).exp() }
+    }
+}
+
 /// Map a scalar post-transform to the expression applied to `raw: f64`.
 /// Softmax is handled by its own model builder and never reaches here.
-pub(crate) fn post_transform_expr(post_transform: &PostTransform) -> TokenStream {
+pub(crate) fn post_transform_expr(post_transform: &PostTransform, no_std: bool) -> TokenStream {
     match post_transform {
         PostTransform::Identity => quote! { raw as f32 },
         PostTransform::Logit => {
-            quote! { (1.0f64 / (1.0f64 + (-raw).exp())) as f32 }
+            let e = exp_expr(quote! { -raw }, no_std);
+            quote! { (1.0f64 / (1.0f64 + #e)) as f32 }
         }
         PostTransform::Log => {
             // Clamp before cast: exp() can exceed f32::MAX for large raw scores.
-            quote! { raw.exp().min(f32::MAX as f64) as f32 }
+            let e = exp_expr(quote! { raw }, no_std);
+            quote! { #e.min(f32::MAX as f64) as f32 }
         }
         PostTransform::Softmax { .. } => unreachable!("softmax handled separately"),
     }
@@ -699,6 +743,7 @@ fn build_softmax_model(
     bitset_helper: &TokenStream,
     catboost_helpers: &TokenStream,
     tree_fns: &[TokenStream],
+    no_std: bool,
 ) -> Result<TokenStream> {
     let raw_decls: Vec<TokenStream> = (0..n_classes)
         .map(|c| {
@@ -745,7 +790,10 @@ fn build_softmax_model(
     let exp_decls: Vec<TokenStream> = raw_vars
         .iter()
         .zip(exp_vars.iter())
-        .map(|(r, e)| quote! { let #e: f64 = (#r - max_raw).exp(); })
+        .map(|(r, e)| {
+            let exp = exp_expr(quote! { #r - max_raw }, no_std);
+            quote! { let #e: f64 = #exp; }
+        })
         .collect();
 
     let sum_decl = quote! { let sum_e: f64 = #(#exp_vars)+*; };
@@ -766,19 +814,32 @@ fn build_softmax_model(
         quote! {}
     };
 
-    Ok(quote! {
-        /// Auto-generated by bonsai.
-        /// Do not edit manually.
-        #bitset_helper
-        #[allow(unused_variables, dead_code, non_snake_case)]
-        #catboost_helpers
+    let methods = if no_std {
+        // core-only interface: probabilities go into a caller-provided slice.
+        let out_stores: Vec<TokenStream> = exp_vars
+            .iter()
+            .enumerate()
+            .map(|(j, e)| quote! { out[#j] = (#e / sum_e) as f32; })
+            .collect();
+        quote! {
+            pub fn predict_proba_into(&self, features: &[f32], out: &mut [f32]) {
+                let ctrs: &[f64] = &[];
+                #(#raw_decls)*
+                #max_decl
+                #(#exp_decls)*
+                #sum_decl
+                #(#out_stores)*
+            }
 
-        pub struct Model;
-
-        #[allow(unused_variables, dead_code)]
-        impl Model {
-            pub const N_CLASSES: usize = #n_classes;
-
+            pub fn predict_batch(&self, features: &[f32], n_features: usize, out: &mut [f32]) {
+                let n_classes = #n_classes;
+                for (i, row) in features.chunks_exact(n_features).enumerate() {
+                    self.predict_proba_into(row, &mut out[i * n_classes..(i + 1) * n_classes]);
+                }
+            }
+        }
+    } else {
+        quote! {
             pub fn predict_proba(&self, features: &[f32]) -> Vec<f32> {
                 self.predict_proba_internal(features, &[])
             }
@@ -802,6 +863,23 @@ fn build_softmax_model(
                 #sum_decl
                 vec![#(#prob_items),*]
             }
+        }
+    };
+
+    Ok(quote! {
+        /// Auto-generated by bonsai.
+        /// Do not edit manually.
+        #bitset_helper
+        #[allow(unused_variables, dead_code, non_snake_case)]
+        #catboost_helpers
+
+        pub struct Model;
+
+        #[allow(unused_variables, dead_code)]
+        impl Model {
+            pub const N_CLASSES: usize = #n_classes;
+
+            #methods
 
             #(#tree_fns)*
         }

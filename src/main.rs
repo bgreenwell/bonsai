@@ -42,6 +42,12 @@ enum Commands {
         /// nested if/else otherwise
         #[arg(long, value_enum, default_value_t = LayoutArg::Auto)]
         layout: LayoutArg,
+
+        /// Generate core-only code for no_std targets: softmax models expose
+        /// predict_proba_into instead of Vec-returning predict_proba, and
+        /// non-identity transforms call exp via the libm crate
+        #[arg(long)]
+        no_std: bool,
     },
 
     /// Inspect a model's structure and metadata
@@ -86,7 +92,8 @@ fn main() -> anyhow::Result<()> {
             input,
             output,
             layout,
-        } => transpile_command(input, output, layout.into()),
+            no_std,
+        } => transpile_command(input, output, layout.into(), no_std),
         Commands::Inspect {
             input,
             trees,
@@ -99,6 +106,7 @@ fn transpile_command(
     input: PathBuf,
     output: PathBuf,
     layout: backends::rust::Layout,
+    no_std: bool,
 ) -> anyhow::Result<()> {
     println!("🌱 bonsai: converting {:?}", input);
 
@@ -108,7 +116,14 @@ fn transpile_command(
     // --- Generate Rust source ---
     let resolved = backends::rust::resolve_layout(&forest, layout)?;
     println!("   > code layout: {:?}", resolved);
-    let rust_code = backends::rust::generate_with_layout(&forest, resolved)?;
+    if no_std {
+        println!("   > no_std mode: core-only output");
+    }
+    let options = backends::rust::CodegenOptions {
+        layout: resolved,
+        no_std,
+    };
+    let rust_code = backends::rust::generate_with_options(&forest, options)?;
     println!("   > generated {} bytes of Rust source", rust_code.len());
 
     // --- Write output ---

@@ -41,6 +41,12 @@ Very large forests (above ~10k nodes) automatically use a flattened array
 layout that keeps rustc compile times low; override with
 `--layout {auto,ifelse,array}`.
 
+For embedded targets, `--no-std` emits core-only code: softmax models expose
+`predict_proba_into(features, &mut out)` instead of a `Vec`-returning
+`predict_proba`, and models with a sigmoid/exp output transform call
+`libm::exp`, so add `libm` to the consuming crate. CatBoost CTR models are
+not supported in this mode.
+
 The generated `model.rs` exposes a `Model` struct with `predict` (scalar),
 `predict_batch` (high-throughput batch), `predict_proba` (classification
 probabilities), and, for CatBoost models with categorical features,
