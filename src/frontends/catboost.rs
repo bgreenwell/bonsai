@@ -40,9 +40,15 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
 
     let post_transform = match loss_function {
         "Logloss" | "CrossEntropy" => PostTransform::Logit,
-        "MultiClass" | "MultiClassOneVsAll" => PostTransform::Softmax {
+        "MultiClass" => PostTransform::Softmax {
             n_classes: classes_count,
         },
+        // Verified against CatBoost's predict_proba: OneVsAll applies a
+        // per-class sigmoid, not softmax, which the IR cannot express.
+        "MultiClassOneVsAll" => anyhow::bail!(
+            "MultiClassOneVsAll applies a per-class sigmoid, which bonsai \
+             does not implement; retrain with loss_function=MultiClass"
+        ),
         "RMSE" | "MAE" | "Quantile" | "Poisson" => PostTransform::Identity,
         _ => {
             println!(
@@ -401,6 +407,13 @@ mod tests {
         let meta = forest.catboost_metadata.expect("expected CTR metadata");
         assert_eq!(meta.ctrs.len(), 1);
         assert_eq!(meta.ctr_data["id1"].hash_stride, 3);
+    }
+
+    #[test]
+    fn test_multiclass_one_vs_all_rejected() {
+        let json = MINIMAL_JSON.replace(r#"{"type": "RMSE"}"#, r#"{"type": "MultiClassOneVsAll"}"#);
+        let err = parse_str(&json).unwrap_err().to_string();
+        assert!(err.contains("per-class sigmoid"), "unexpected error: {err}");
     }
 
     #[test]

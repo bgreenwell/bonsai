@@ -37,7 +37,7 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
         .unwrap_or("reg:squarederror");
     println!("   > objective: {}", objective_name);
 
-    let post_transform = post_transform_for_objective(objective_name, num_class);
+    let post_transform = post_transform_for_objective(objective_name, num_class)?;
 
     // Parse base_score: scalar for binary/regression, vector for multiclass.
     let (base_score, base_scores) = if base_score_inner.contains(',') {
@@ -131,16 +131,25 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
 // Objective mapping
 // ---------------------------------------------------------------------------
 
-fn post_transform_for_objective(name: &str, num_class: usize) -> PostTransform {
-    match name {
+// Mappings verified against XGBoost's own predict() vs output_margin output.
+fn post_transform_for_objective(name: &str, num_class: usize) -> Result<PostTransform> {
+    Ok(match name {
         "binary:logistic" | "reg:logistic" => PostTransform::Logit,
         // binary:logitraw outputs raw margin (no sigmoid); sigmoid is the caller's responsibility
         "binary:logitraw" => PostTransform::Identity,
         "multi:softmax" | "multi:softprob" => PostTransform::Softmax {
             n_classes: num_class.max(2),
         },
-        // Log-link objectives: XGBoost applies exp() at prediction time.
-        "count:poisson" | "reg:gamma" | "reg:tweedie" => PostTransform::Log,
+        // Log-link objectives, including survival: XGBoost applies exp() at
+        // prediction time (cox predictions are hazard ratios, aft are time).
+        "count:poisson" | "reg:gamma" | "reg:tweedie" | "survival:cox" | "survival:aft" => {
+            PostTransform::Log
+        }
+        // hinge predicts a hard 0/1 step, which the IR cannot express.
+        "binary:hinge" => anyhow::bail!(
+            "binary:hinge outputs a 0/1 step function bonsai does not \
+             implement; retrain with binary:logistic"
+        ),
         // Raw-score objectives, including ranking (rank:* outputs are
         // relevance scores with no transform).
         "reg:squarederror"
@@ -158,7 +167,7 @@ fn post_transform_for_objective(name: &str, num_class: usize) -> PostTransform {
             );
             PostTransform::Identity
         }
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -505,5 +514,21 @@ mod tests {
 
         let tweedie = parse(&REGRESSION_JSON.replace("reg:squarederror", "reg:tweedie"));
         assert_eq!(tweedie.post_transform, PostTransform::Log);
+    }
+
+    #[test]
+    fn test_survival_objectives_use_log_link() {
+        for obj in ["survival:cox", "survival:aft"] {
+            let forest = parse(&REGRESSION_JSON.replace("reg:squarederror", obj));
+            assert_eq!(forest.post_transform, PostTransform::Log, "{obj}");
+        }
+    }
+
+    #[test]
+    fn test_hinge_rejected() {
+        let json = REGRESSION_JSON.replace("reg:squarederror", "binary:hinge");
+        let root: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let err = parse_json(&root).unwrap_err().to_string();
+        assert!(err.contains("binary:hinge"), "unexpected error: {err}");
     }
 }

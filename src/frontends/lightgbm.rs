@@ -150,6 +150,13 @@ fn parse_node(node: &Value, depth: usize) -> Result<Node> {
         "tree depth exceeds maximum ({MAX_TREE_DEPTH}); possible malformed model"
     );
     if let Some(v) = node.get("leaf_value") {
+        // linear_tree=true stores a linear model per leaf; scoring only the
+        // constant would silently mis-predict.
+        anyhow::ensure!(
+            node.get("leaf_coeff").is_none() && node.get("leaf_const").is_none(),
+            "linear_tree models are not supported (leaves carry linear \
+             models); retrain with linear_tree=false"
+        );
         let value = v
             .as_f64()
             .ok_or_else(|| anyhow!("leaf_value is not a number: {:?}", v))?;
@@ -597,6 +604,18 @@ mod tests {
             r#"["lambdarank"]"#,
         ));
         assert_eq!(rank.post_transform, PostTransform::Identity);
+    }
+
+    #[test]
+    fn test_linear_tree_rejected() {
+        let json = REGRESSION_JSON.replace(
+            r#"{"leaf_index": 0, "leaf_value":  1.0}"#,
+            r#"{"leaf_index": 0, "leaf_value": 1.0, "leaf_const": 0.5, "leaf_coeff": [0.1], "leaf_features": [0]}"#,
+        );
+        assert_ne!(json, REGRESSION_JSON, "replacement must apply");
+        let root: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let err = format!("{:#}", parse_json(&root).unwrap_err());
+        assert!(err.contains("linear_tree"), "unexpected error: {err}");
     }
 
     #[test]
