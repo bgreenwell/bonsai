@@ -33,9 +33,16 @@ cargo install --path .
 # Convert a model to Rust code
 bonsai transpile --input model.json --output model.rs
 
+# Verify the transpiled model against reference predictions:
+# transpiles, compiles with rustc, scores the CSV, and diffs
+bonsai verify --input model.json --data test.csv --tolerance 1e-5
+
 # Inspect a model's structure and statistics
 bonsai inspect --input model.json
 ```
+
+The verify CSV holds the feature columns plus a `ground_truth` column
+(scalar models) or `ground_truth_proba_<c>` columns (multiclass).
 
 Very large forests (above ~10k nodes) automatically use a flattened array
 layout that keeps rustc compile times low; override with

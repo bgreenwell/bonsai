@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ranking objectives (XGBoost rank:*, LightGBM lambdarank/xendcg) emit raw scores.
 - Clear errors for unsupported models: XGBoost gblinear, native categorical splits, multi-output; LightGBM multiclassova and cross_entropy_lambda.
 - `--no-std` flag generating core-only code for embedded targets (softmax models expose `predict_proba_into`; exp goes through libm).
+- `bonsai verify` subcommand: transpile, compile, score a CSV, and diff against reference predictions in one step.
 
 ### Changed
 - CatBoost frontend now rejects malformed models (missing loss function, CTR fields, or scale/bias) instead of substituting defaults.

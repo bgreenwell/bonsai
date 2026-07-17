@@ -21,6 +21,9 @@ cargo build --release
 # Or during development:
 cargo run -- transpile --input model.zip --output model.rs
 
+# Verify a model end to end (transpile, compile, score CSV, diff)
+./target/release/bonsai verify --input model.json --data test.csv
+
 # Run all unit tests
 cargo test
 
