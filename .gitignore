@@ -8,3 +8,4 @@ model_generated.rs
 temp/
 catboost_info/
 .agents/
+assets/tests/versions.json

@@ -48,6 +48,8 @@ def main():
             print(f"Unexpected error: {e}")
             failures.append(script)
 
+    write_versions(base_dir)
+
     print("-" * 60)
     if failures:
         print(f"{len(failures)} script(s) failed:")
@@ -55,6 +57,23 @@ def main():
             print(f"  {f}")
         sys.exit(1)
     print("Finished processing all generation scripts.")
+
+
+def write_versions(base_dir: Path):
+    """Record which framework versions produced the fixtures, so a breaking
+    upstream release is identifiable from the failing CI run alone."""
+    import importlib
+    import json
+
+    versions = {}
+    for mod in ["xgboost", "lightgbm", "catboost", "sklearn", "skl2onnx", "onnx", "numpy"]:
+        try:
+            versions[mod] = importlib.import_module(mod).__version__
+        except ImportError:
+            pass
+    out = base_dir / "versions.json"
+    out.write_text(json.dumps(versions, indent=2) + "\n")
+    print(f"Framework versions recorded in {out}: {versions}")
 
 
 if __name__ == "__main__":

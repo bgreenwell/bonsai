@@ -14,12 +14,21 @@ edge devices, and WASM targets where shipping an ML runtime is impractical.
 ## Supported formats
 
 - H2O-3 MOJO (`.zip`)
-- ONNX tree ensembles (`.onnx`, `.pb`)
-- XGBoost native JSON (`booster.save_model("model.json")`)
+- ONNX tree ensembles (`.onnx`, `.pb`; `TreeEnsembleRegressor`/`Classifier`
+  operators)
+- XGBoost native JSON (`booster.save_model("model.json")`), including DART
+  boosters and native categorical splits (`enable_categorical=True`)
 - LightGBM JSON dump (`booster.dump_model()`)
 - CatBoost JSON (`model.save_model("model.json", format="json")`), including
-  native categorical (CTR) support and a branchless fast path for oblivious
-  trees
+  native categoricals (both CTR and one-hot splits) and a branchless fast
+  path for oblivious trees
+
+Models that would score incorrectly are rejected with an explanation rather
+than transpiled: LightGBM `linear_tree` and `multiclassova`, CatBoost
+`MultiClassOneVsAll` and non-symmetric grow policies, XGBoost `gblinear`,
+`binary:hinge`, and multi-output regression, and ONNX opset-5
+`TreeEnsemble`/PROBIT models. Binary formats (`.ubj`, `.txt`, `.cbm`) need a
+JSON re-export; the error messages show the exact call.
 
 ## Installation
 
