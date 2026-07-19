@@ -63,6 +63,9 @@ Parse format-specific models into a universal intermediate representation:
 - **`xgboost.rs`**: XGBoost format (.json)
   - Parses JSON model dumped via `booster.save_model()`
   - Handles parallel array format and logit transformation for `base_score`
+  - Native categorical splits (`split_type`/`categories` arrays) become bitset splits; in-set categories go right
+  - DART boosters apply `weight_drop` scaling via IR tree weights
+  - Rejects gblinear, multi-output, and binary:hinge models
   - Builds `ir::Forest`
 
 - **`lightgbm.rs`**: LightGBM format (.json)
@@ -74,7 +77,9 @@ Parse format-specific models into a universal intermediate representation:
   - Parses JSON model saved via `model.save_model(path, format="json")` (top-level `oblivious_trees` key)
   - Expands oblivious (symmetric) trees into IR trees; backend detects symmetry and emits a branchless fast path
   - Parses CTR metadata (`features_info.ctrs`) and CTR value tables (`ctr_data`) for native categorical features; generated code hashes categories with CityHash64 and looks up CTR values via binary search
-  - Builds `ir::Forest` with `catboost_metadata` attached when categoricals are present
+  - One-hot splits (`OneHotFeature`) compare the category's 32-bit hash against the stored value
+  - Rejects MultiClassOneVsAll (per-class sigmoid) and non-symmetric grow policies
+  - Builds `ir::Forest` with `catboost_metadata` attached when categoricals are present (CTR or one-hot)
 
 **File extension detection in `main.rs`:** `.zip` → MOJO, `.onnx`/`.pb` → ONNX, `.json` → XGBoost/LightGBM/CatBoost (auto-detected via JSON keys; CatBoost via `oblivious_trees`)
 

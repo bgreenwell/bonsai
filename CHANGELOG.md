@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provenance header in generated code (bonsai version, source file hash, codegen settings).
 - `--emit crate` mode producing a full cargo crate, with golden tests baked in when `--data` is given.
 - IR interpreter (`bonsai verify --engine interpret`) scoring models without rustc, bit-identical to compiled output.
+- XGBoost native categorical splits (`enable_categorical=True`).
+- CatBoost one-hot categorical splits (default `one_hot_max_size` path).
+- XGBoost survival objectives (`survival:cox`, `survival:aft`) map to the exp transform.
+- Weekly scheduled CI run against the latest framework releases; fixture generation records framework versions.
+- Clear errors for `.ubj`/`.txt`/`.cbm` inputs, ONNX opset-5 `TreeEnsemble` and PROBIT models, and CatBoost non-symmetric grow policies.
 
 ### Changed
 - CatBoost frontend now rejects malformed models (missing loss function, CTR fields, or scale/bias) instead of substituting defaults.
@@ -38,3 +43,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CatBoost loss function was not detected in newer JSON exports.
 - LightGBM Poisson/gamma/Tweedie models were missing the exp() output transform.
 - XGBoost DART models were scored without weight_drop scaling.
+- LightGBM linear_tree and CatBoost MultiClassOneVsAll models are rejected instead of silently mis-predicting.

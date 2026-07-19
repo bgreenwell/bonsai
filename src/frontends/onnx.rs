@@ -31,6 +31,16 @@ impl super::Frontend for OnnxFrontend {
             .ok_or_else(|| anyhow!("ONNX Model has no graph"))?;
 
         // 3. Find TreeEnsemble operator
+        anyhow::ensure!(
+            !graph
+                .node
+                .iter()
+                .any(|n| n.op_type.as_deref() == Some("TreeEnsemble")),
+            "This model uses the ai.onnx.ml opset-5 'TreeEnsemble' operator, \
+             which bonsai does not support yet; re-export targeting the \
+             TreeEnsembleRegressor/TreeEnsembleClassifier operators (ai.onnx.ml \
+             opset 3, e.g. skl2onnx target_opset={{'ai.onnx.ml': 3}})."
+        );
         let node = graph
             .node
             .iter()
@@ -257,7 +267,13 @@ impl super::Frontend for OnnxFrontend {
             "SOFTMAX" | "SOFTMAX_ZERO" if n_classes_from_attr > 2 => PostTransform::Softmax {
                 n_classes: n_classes_from_attr,
             },
-            _ => PostTransform::Identity,
+            // Binary softmax collapses to raw scores here (the class-1 score
+            // is what the fixtures validate); keep the historical behavior.
+            "NONE" | "" | "SOFTMAX" | "SOFTMAX_ZERO" => PostTransform::Identity,
+            "PROBIT" => {
+                anyhow::bail!("PROBIT post-transform (inverse normal CDF) is not implemented")
+            }
+            other => anyhow::bail!("Unknown ONNX post_transform '{}'", other),
         };
 
         let base_score = get_attr("base_values")

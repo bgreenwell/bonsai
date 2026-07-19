@@ -305,6 +305,12 @@ fn detect_and_parse_json(input: &Path) -> anyhow::Result<ir::Forest> {
     } else if root.get("oblivious_trees").is_some() {
         println!("   > Detected CatBoost JSON");
         frontends::catboost::parse_json(&root)
+    } else if root.get("model_info").is_some() && root.get("trees").is_some() {
+        anyhow::bail!(
+            "This CatBoost model uses non-symmetric trees (grow_policy \
+             Depthwise or Lossguide), which bonsai does not support yet; \
+             retrain with grow_policy=SymmetricTree."
+        )
     } else {
         anyhow::bail!(
             "Unrecognized JSON model format in '{:?}'. \
@@ -324,6 +330,18 @@ fn parse_model(input: &Path) -> anyhow::Result<ir::Forest> {
         "zip" => frontends::mojo::MojoFrontend::new().parse(input),
         "onnx" | "pb" => frontends::onnx::OnnxFrontend::new().parse(input),
         "json" => detect_and_parse_json(input),
+        "ubj" => anyhow::bail!(
+            "XGBoost UBJSON is not supported; re-save the model as JSON with \
+             booster.save_model(\"model.json\")."
+        ),
+        "txt" => anyhow::bail!(
+            "LightGBM text format is not supported; export JSON with \
+             booster.dump_model() instead."
+        ),
+        "cbm" => anyhow::bail!(
+            "CatBoost binary format is not supported; export JSON with \
+             model.save_model(path, format=\"json\")."
+        ),
         _ => anyhow::bail!(
             "Unsupported file extension '.{}'. \
              Expected .zip (MOJO), .onnx/.pb (ONNX), or .json (XGBoost/LightGBM/CatBoost).",
