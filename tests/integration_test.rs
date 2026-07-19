@@ -703,6 +703,13 @@ fn test_xgboost_classification_numeric() {
 
 #[test]
 #[ignore]
+fn test_xgboost_regression_categorical() {
+    // Native categorical splits (enable_categorical=True) use bitsets.
+    run_test_case_tol("xgboost/regression_categorical", true, 1e-4);
+}
+
+#[test]
+#[ignore]
 fn test_xgboost_classification_multiclass() {
     // Validates round-robin tree-to-class assignment and softmax numerical stability.
     // XGBoost leaf precision: use 1e-4 tolerance (f32 accumulation over many trees).

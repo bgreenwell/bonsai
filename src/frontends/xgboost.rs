@@ -176,21 +176,10 @@ fn post_transform_for_objective(name: &str, num_class: usize) -> Result<PostTran
 
 const MAX_TREE_DEPTH: usize = 256;
 
-fn parse_tree(tv: &Value) -> Result<Tree> {
-    // Native categorical splits (enable_categorical=True) store bitset
-    // partitions we do not implement; reject rather than mis-predict.
-    let has_categorical_split = tv["split_type"]
-        .as_array()
-        .is_some_and(|a| a.iter().any(|v| v.as_i64().unwrap_or(0) != 0))
-        || tv["categories_nodes"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty());
-    anyhow::ensure!(
-        !has_categorical_split,
-        "Native categorical splits are not supported. Retrain without \
-         enable_categorical, or one-hot/label encode categorical features."
-    );
+/// Largest category value accepted for a bitset split (128 KiB of bitset).
+const MAX_CATEGORY: u32 = 1 << 20;
 
+fn parse_tree(tv: &Value) -> Result<Tree> {
     let left = int_array(&tv["left_children"]).context("left_children")?;
     let right = int_array(&tv["right_children"]).context("right_children")?;
     let feat = int_array(&tv["split_indices"]).context("split_indices")?;
@@ -205,10 +194,74 @@ fn parse_tree(tv: &Value) -> Result<Tree> {
         "XGBoost tree arrays have mismatched lengths"
     );
 
-    let root = build_node(0, &left, &right, &feat, &cond, &def_left, 0)?;
+    let split_type = if tv["split_type"].is_null() {
+        vec![]
+    } else {
+        int_array(&tv["split_type"]).context("split_type")?
+    };
+    let categories = parse_categories(tv).context("categorical split metadata")?;
+
+    let root = build_node(
+        0,
+        &left,
+        &right,
+        &feat,
+        &cond,
+        &def_left,
+        &split_type,
+        &categories,
+        0,
+    )?;
     Ok(Tree { root, weight: 1.0 })
 }
 
+/// Decode the parallel categorical arrays (enable_categorical=True) into a
+/// per-node category list: categories_nodes[k] holds a node id whose
+/// categories are categories[segments[k] .. segments[k] + sizes[k]].
+fn parse_categories(tv: &Value) -> Result<std::collections::HashMap<usize, Vec<u32>>> {
+    let mut map = std::collections::HashMap::new();
+    if tv["categories_nodes"].is_null() {
+        return Ok(map);
+    }
+    let nodes = int_array(&tv["categories_nodes"]).context("categories_nodes")?;
+    if nodes.is_empty() {
+        return Ok(map);
+    }
+    let segments = int_array(&tv["categories_segments"]).context("categories_segments")?;
+    let sizes = int_array(&tv["categories_sizes"]).context("categories_sizes")?;
+    let cats = int_array(&tv["categories"]).context("categories")?;
+    anyhow::ensure!(
+        nodes.len() == segments.len() && nodes.len() == sizes.len(),
+        "categories_nodes/segments/sizes lengths differ"
+    );
+
+    for ((node, seg), size) in nodes.iter().zip(&segments).zip(&sizes) {
+        let (seg, size) = (*seg as usize, *size as usize);
+        anyhow::ensure!(
+            seg + size <= cats.len(),
+            "categories segment out of bounds (segment {} + size {} > {})",
+            seg,
+            size,
+            cats.len()
+        );
+        let values: Vec<u32> = cats[seg..seg + size]
+            .iter()
+            .map(|&c| {
+                anyhow::ensure!(
+                    (0..MAX_CATEGORY as i64).contains(&c),
+                    "category value {} out of supported range 0..{}",
+                    c,
+                    MAX_CATEGORY
+                );
+                Ok(c as u32)
+            })
+            .collect::<Result<_>>()?;
+        map.insert(*node as usize, values);
+    }
+    Ok(map)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_node(
     id: i64,
     left: &[i64],
@@ -216,6 +269,8 @@ fn build_node(
     feat: &[i64],
     cond: &[f32],
     def_left: &[i64],
+    split_type: &[i64],
+    categories: &std::collections::HashMap<usize, Vec<u32>>,
     depth: usize,
 ) -> Result<Node> {
     anyhow::ensure!(
@@ -239,16 +294,57 @@ fn build_node(
         right[uid]
     );
 
-    let l = build_node(left[uid], left, right, feat, cond, def_left, depth + 1)?;
-    let r = build_node(right[uid], left, right, feat, cond, def_left, depth + 1)?;
+    let l = build_node(
+        left[uid],
+        left,
+        right,
+        feat,
+        cond,
+        def_left,
+        split_type,
+        categories,
+        depth + 1,
+    )?;
+    let r = build_node(
+        right[uid],
+        left,
+        right,
+        feat,
+        cond,
+        def_left,
+        split_type,
+        categories,
+        depth + 1,
+    )?;
 
-    // XGBoost split: feature[i] < threshold → yes → left child
-    Ok(Node::Split {
-        feature_idx: feat[uid] as usize,
-        split: SplitKind::Numeric {
+    let split = if split_type.get(uid).copied().unwrap_or(0) == 1 {
+        // Categorical split: category IN the stored set goes RIGHT (verified
+        // against XGBoost's predict), which matches the IR bitset convention.
+        let cats = categories
+            .get(&uid)
+            .ok_or_else(|| anyhow!("node {} is categorical but has no categories entry", id))?;
+        let max_cat = cats.iter().max().copied().unwrap_or(0);
+        let nbits = max_cat + 1;
+        let mut data = vec![0u8; (max_cat / 8 + 1) as usize];
+        for &c in cats {
+            data[(c / 8) as usize] |= 1u8 << (c % 8);
+        }
+        SplitKind::Categorical {
+            bitoff: 0,
+            nbits,
+            data,
+        }
+    } else {
+        // Numeric split: feature[i] < threshold → yes → left child
+        SplitKind::Numeric {
             threshold: cond[uid],
             operator: Operator::LessThan,
-        },
+        }
+    };
+
+    Ok(Node::Split {
+        feature_idx: feat[uid] as usize,
+        split,
         left_child: Box::new(l),
         right_child: Box::new(r),
         missing_direction: if def_left[uid] != 0 {
@@ -483,16 +579,79 @@ mod tests {
     }
 
     #[test]
-    fn test_native_categorical_split_rejected() {
-        let json = REGRESSION_JSON.replace(
-            r#""default_left":   [0,  0,  0]"#,
-            r#""default_left":   [0,  0,  0],
-               "split_type":     [1,  0,  0],
-               "categories_nodes": [0]"#,
+    fn test_native_categorical_split_semantics() {
+        // Branch direction verified against XGBoost's own predict output:
+        // category in the stored set goes RIGHT.
+        let forest = parse(CATEGORICAL_JSON);
+        let predict = |c: f32| crate::interpreter::predict(&forest, &[c, 0.0]).unwrap()[0];
+        for in_set in [0.0, 2.0, 4.0] {
+            assert_eq!(predict(in_set), -1.0, "category {in_set} should go right");
+        }
+        for out_of_set in [1.0, 3.0, 5.0, 99.0] {
+            assert_eq!(
+                predict(out_of_set),
+                1.0,
+                "category {out_of_set} should go left"
+            );
+        }
+        // default_left = 1: NaN routes left.
+        assert_eq!(predict(f32::NAN), 1.0);
+    }
+
+    // Single categorical split on feature 0: categories {0, 2, 4} go right
+    // (leaf -1.0), everything else left (leaf 1.0), NaN defaults left.
+    const CATEGORICAL_JSON: &str = r#"{
+      "learner": {
+        "learner_model_param": {"base_score":"0","num_class":"0","num_feature":"2"},
+        "objective": {"name": "reg:squarederror"},
+        "gradient_booster": {"model": {"trees": [{
+          "left_children":  [1, -1, -1],
+          "right_children": [2, -1, -1],
+          "split_indices":  [0,  0,  0],
+          "split_conditions": [0.0, 1.0, -1.0],
+          "default_left":   [1,  0,  0],
+          "split_type":     [1,  0,  0],
+          "categories_nodes":    [0],
+          "categories_segments": [0],
+          "categories_sizes":    [3],
+          "categories":          [0, 2, 4]
+        }]}}
+      }
+    }"#;
+
+    #[test]
+    fn test_categorical_generated_code_matches_interpreter() {
+        let forest = parse(CATEGORICAL_JSON);
+        let code = crate::backends::rust::generate(&forest).unwrap();
+        assert!(code.contains("bitset_contains"));
+        let rows: Vec<Vec<f32>> = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, f32::NAN]
+            .iter()
+            .map(|&c| vec![c, 0.0])
+            .collect();
+        let mut expected = String::new();
+        for row in &rows {
+            let p = crate::interpreter::predict(&forest, row).unwrap()[0];
+            expected.push_str(&format!("{:08x}\n", p.to_bits()));
+        }
+        let driver = crate::testutil::scalar_driver(&rows);
+        assert_eq!(crate::testutil::compile_and_run(&code, &driver), expected);
+    }
+
+    #[test]
+    fn test_categorical_metadata_mismatch_errors() {
+        // categories_nodes present but a parallel array is missing.
+        let json = CATEGORICAL_JSON.replace(r#""categories_segments": [0],"#, "");
+        let root: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parse_json(&root).is_err());
+
+        // Segment reaches past the categories array.
+        let json = CATEGORICAL_JSON.replace(
+            r#""categories_sizes":    [3],"#,
+            r#""categories_sizes": [9],"#,
         );
         let root: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let err = parse_json(&root).unwrap_err().root_cause().to_string();
-        assert!(err.contains("categorical"), "unexpected error: {}", err);
+        let err = format!("{:#}", parse_json(&root).unwrap_err());
+        assert!(err.contains("out of bounds"), "unexpected error: {err}");
     }
 
     #[test]
