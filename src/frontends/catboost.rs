@@ -78,13 +78,6 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
         }
     }
 
-    // Only attach CatBoost metadata when the model actually uses categorical features.
-    let catboost_metadata = if ctrs.is_empty() {
-        None
-    } else {
-        Some(CatboostMetadata { ctrs, ctr_data })
-    };
-
     // Parse oblivious trees
     let trees_val = root
         .get("oblivious_trees")
@@ -133,6 +126,15 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
     let base_score = if biases.len() == 1 { biases[0] } else { 0.0 };
     let base_scores = if biases.len() > 1 { biases } else { vec![] };
 
+    // Attach metadata when the model uses categorical features (CTRs or
+    // one-hot splits); it drives predict_cat and hash-helper emission.
+    let uses_one_hot = all_trees.iter().any(|t| node_has_one_hot(&t.root));
+    let catboost_metadata = if ctrs.is_empty() && !uses_one_hot {
+        None
+    } else {
+        Some(CatboostMetadata { ctrs, ctr_data })
+    };
+
     Ok(Forest {
         trees: all_trees,
         base_score,
@@ -141,6 +143,22 @@ pub(crate) fn parse_json(root: &Value) -> Result<Forest> {
         post_transform,
         catboost_metadata,
     })
+}
+
+fn node_has_one_hot(node: &Node) -> bool {
+    match node {
+        Node::Leaf { .. } => false,
+        Node::Split {
+            split,
+            left_child,
+            right_child,
+            ..
+        } => {
+            matches!(split, SplitKind::OneHotCat { .. })
+                || node_has_one_hot(left_child)
+                || node_has_one_hot(right_child)
+        }
+    }
 }
 
 fn parse_ctr_info(c_val: &Value) -> Result<CtrInfo> {
@@ -240,8 +258,18 @@ fn scale_node(node: &mut Node, scale: f64) {
 }
 
 enum CatboostSplit {
-    Numeric { feature_idx: usize, threshold: f32 },
-    Ctr { ctr_idx: usize, threshold: f32 },
+    Numeric {
+        feature_idx: usize,
+        threshold: f32,
+    },
+    Ctr {
+        ctr_idx: usize,
+        threshold: f32,
+    },
+    OneHot {
+        cat_feature_index: usize,
+        value: i32,
+    },
 }
 
 fn parse_oblivious_tree(tv: &Value, classes_count: usize) -> Result<Vec<Tree>> {
@@ -276,6 +304,19 @@ fn parse_oblivious_tree(tv: &Value, classes_count: usize) -> Result<Vec<Tree>> {
                 .as_f64()
                 .ok_or_else(|| anyhow!("Missing 'border'"))? as f32;
             splits.push(CatboostSplit::Ctr { ctr_idx, threshold });
+        } else if split_type == "OneHotFeature" {
+            let cat_feature_index = sv["cat_feature_index"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("Missing 'cat_feature_index' for OneHotFeature"))?
+                as usize;
+            let value = sv["value"]
+                .as_i64()
+                .ok_or_else(|| anyhow!("Missing 'value' for OneHotFeature"))?
+                as i32;
+            splits.push(CatboostSplit::OneHot {
+                cat_feature_index,
+                value,
+            });
         } else {
             anyhow::bail!("Unsupported CatBoost split type: {}", split_type);
         }
@@ -338,11 +379,18 @@ fn build_oblivious_node(splits: &[CatboostSplit], leaf_values: &[f64]) -> Node {
             ctr_idx: *ctr_idx,
             threshold: *threshold,
         },
+        CatboostSplit::OneHot {
+            cat_feature_index,
+            value,
+        } => SplitKind::OneHotCat {
+            cat_feature_index: *cat_feature_index,
+            value: *value,
+        },
     };
 
     let feature_idx = match current_split {
         CatboostSplit::Numeric { feature_idx, .. } => *feature_idx,
-        CatboostSplit::Ctr { .. } => 0,
+        CatboostSplit::Ctr { .. } | CatboostSplit::OneHot { .. } => 0,
     };
 
     Node::Split {
@@ -407,6 +455,57 @@ mod tests {
         let meta = forest.catboost_metadata.expect("expected CTR metadata");
         assert_eq!(meta.ctrs.len(), 1);
         assert_eq!(meta.ctr_data["id1"].hash_stride, 3);
+    }
+
+    const ONEHOT_JSON: &str = r#"{
+      "model_info": {"params": {"loss_function": {"type": "RMSE"}}},
+      "oblivious_trees": [{
+        "splits": [{"split_type": "OneHotFeature", "cat_feature_index": 0, "value": 1343633897}],
+        "leaf_values": [1.0, 2.0]
+      }],
+      "features_info": {}
+    }"#;
+
+    #[test]
+    fn test_one_hot_split_parses_with_metadata() {
+        let forest = parse_str(ONEHOT_JSON).unwrap();
+        assert!(
+            forest.catboost_metadata.is_some(),
+            "one-hot models need metadata so predict_cat and hash helpers are emitted"
+        );
+        match &forest.trees[0].root {
+            Node::Split { split, .. } => match split {
+                SplitKind::OneHotCat {
+                    cat_feature_index,
+                    value,
+                } => {
+                    assert_eq!(*cat_feature_index, 0);
+                    assert_eq!(*value, 1343633897);
+                }
+                other => panic!("expected OneHotCat split, got {:?}", other),
+            },
+            _ => panic!("expected split at root"),
+        }
+    }
+
+    #[test]
+    fn test_one_hot_codegen_emits_hash_compare() {
+        let forest = parse_str(ONEHOT_JSON).unwrap();
+        let code = crate::backends::rust::generate(&forest).unwrap();
+        assert!(code.contains("calc_cat_hashes"), "hash helper missing");
+        assert!(code.contains("predict_cat"), "predict_cat missing");
+        assert!(
+            code.contains("cat_hashes [0usize] == 1343633897i32"),
+            "hash comparison missing: {}",
+            &code[..code.len().min(400)]
+        );
+    }
+
+    #[test]
+    fn test_one_hot_missing_value_errors() {
+        let json = ONEHOT_JSON.replace(r#""value": 1343633897"#, r#""other": 1"#);
+        let err = format!("{:#}", parse_str(&json).unwrap_err());
+        assert!(err.contains("value"), "unexpected error: {err}");
     }
 
     #[test]

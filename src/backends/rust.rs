@@ -187,7 +187,7 @@ fn generate_ifelse(forest: &Forest, no_std: bool) -> Result<String> {
                 quote! {
                     #[inline(always)]
                     #[allow(unused_variables)]
-                    fn #fn_name(features: &[f32], ctrs: &[f64]) -> f64 {
+                    fn #fn_name(features: &[f32], ctrs: &[f64], cat_hashes: &[i32]) -> f64 {
                         #body
                     }
                 }
@@ -229,7 +229,7 @@ fn generate_ifelse(forest: &Forest, no_std: bool) -> Result<String> {
         .map(|(i, tree)| {
             let fn_name = format_ident!("tree_{}", i);
             let w = tree.weight;
-            quote! { Self::#fn_name(features, ctrs) * #w }
+            quote! { Self::#fn_name(features, ctrs, cat_hashes) * #w }
         })
         .collect();
 
@@ -251,13 +251,17 @@ fn generate_ifelse(forest: &Forest, no_std: bool) -> Result<String> {
             quote! {
                 pub fn predict_cat(&self, float_features: &[f32], cat_features: &[&str]) -> f32 {
                     let ctrs = calculate_ctrs(float_features, cat_features);
-                    self.predict_internal(float_features, &ctrs)
+                    let cat_hashes = calc_cat_hashes(cat_features);
+                    self.predict_internal(float_features, &ctrs, &cat_hashes)
                 }
             },
-            quote! { self.predict_internal(features, &[]) },
+            quote! { self.predict_internal(features, &[], &[]) },
         )
     } else {
-        (quote! {}, quote! { self.predict_internal(features, &[]) })
+        (
+            quote! {},
+            quote! { self.predict_internal(features, &[], &[]) },
+        )
     };
 
     let output = quote! {
@@ -285,7 +289,7 @@ fn generate_ifelse(forest: &Forest, no_std: bool) -> Result<String> {
                 }
             }
 
-            fn predict_internal(&self, features: &[f32], ctrs: &[f64]) -> f32 {
+            fn predict_internal(&self, features: &[f32], ctrs: &[f64], cat_hashes: &[i32]) -> f32 {
                 let raw: f64 = #aggregation_expr;
                 #post_transform_expr
             }
@@ -550,6 +554,15 @@ fn build_catboost_helpers(meta: &CatboostMetadata) -> Result<TokenStream> {
                 #(#ctr_calls),*
             ]
         }
+
+        /// CatBoost CalcCatFeatureHash: low 32 bits of CityHash64, as i32.
+        #[allow(dead_code)]
+        fn calc_cat_hashes(cat_features: &[&str]) -> Vec<i32> {
+            cat_features
+                .iter()
+                .map(|s| (city_hash64(s.as_bytes()) as u32) as i32)
+                .collect()
+        }
     })
 }
 
@@ -623,15 +636,12 @@ fn compile_node(node: &Node) -> TokenStream {
             right_child,
             missing_direction,
         } => {
-            let fi = *feature_idx;
             let left_code = compile_node(left_child);
             let right_code = compile_node(right_child);
-            let left_cond = compile_condition(split, *missing_direction);
+            let left_cond = condition_block(*feature_idx, split, *missing_direction);
 
-            // Each depth lives in its own block so `val` bindings shadow cleanly.
             quote! {
                 {
-                    let val = features[#fi];
                     if #left_cond {
                         #left_code
                     } else {
@@ -639,6 +649,24 @@ fn compile_node(node: &Node) -> TokenStream {
                     }
                 }
             }
+        }
+    }
+}
+
+/// The full left-branch condition as a block, binding `val` only for splits
+/// that read a float feature (CTR and one-hot splits read other inputs, and
+/// a categorical-only model may have an empty float feature slice).
+fn condition_block(
+    feature_idx: usize,
+    split: &SplitKind,
+    missing_direction: MissingDirection,
+) -> TokenStream {
+    let cond = compile_condition(split, missing_direction);
+    match split {
+        SplitKind::OnlineCtr { .. } | SplitKind::OneHotCat { .. } => quote! { { #cond } },
+        _ => {
+            // Each block scopes its own `val` binding so depths shadow cleanly.
+            quote! { { let val = features[#feature_idx]; #cond } }
         }
     }
 }
@@ -700,6 +728,18 @@ fn compile_condition(split: &SplitKind, missing_direction: MissingDirection) -> 
             let th = *threshold;
             quote! { ctrs[#ctr_idx] >= (#th as f64) }
         }
+
+        (
+            _,
+            SplitKind::OneHotCat {
+                cat_feature_index,
+                value,
+            },
+        ) => {
+            let idx = *cat_feature_index;
+            let v = *value;
+            quote! { cat_hashes[#idx] == #v }
+        }
     }
 }
 
@@ -714,9 +754,9 @@ fn compile_oblivious_tree(
     let mut index_expr = quote! { 0usize };
     for (i, (fi, split, md)) in splits.iter().enumerate() {
         let bit = 1usize << (n - 1 - i);
-        let cond = compile_condition(split, *md);
+        let cond = condition_block(*fi, split, *md);
         index_expr = quote! {
-            #index_expr | if { let val = features[#fi]; #cond } { #bit } else { 0 }
+            #index_expr | if #cond { #bit } else { 0 }
         };
     }
 
@@ -725,7 +765,7 @@ fn compile_oblivious_tree(
     quote! {
         #[inline(always)]
         #[allow(unused_variables)]
-        fn #fn_name(features: &[f32], ctrs: &[f64]) -> f64 {
+        fn #fn_name(features: &[f32], ctrs: &[f64], cat_hashes: &[i32]) -> f64 {
             let index = #index_expr;
             const LEAVES: [f64; #n_leaves] = [#(#leaf_tokens),*];
             LEAVES[index]
@@ -762,7 +802,7 @@ fn build_softmax_model(
                 .map(|(i, tree)| {
                     let fn_name = format_ident!("tree_{}", i);
                     let w = tree.weight;
-                    quote! { Self::#fn_name(features, ctrs) * #w }
+                    quote! { Self::#fn_name(features, ctrs, cat_hashes) * #w }
                 })
                 .collect();
 
@@ -807,7 +847,8 @@ fn build_softmax_model(
         quote! {
             pub fn predict_cat_proba(&self, float_features: &[f32], cat_features: &[&str]) -> Vec<f32> {
                 let ctrs = calculate_ctrs(float_features, cat_features);
-                self.predict_proba_internal(float_features, &ctrs)
+                let cat_hashes = calc_cat_hashes(cat_features);
+                self.predict_proba_internal(float_features, &ctrs, &cat_hashes)
             }
         }
     } else {
@@ -824,6 +865,7 @@ fn build_softmax_model(
         quote! {
             pub fn predict_proba_into(&self, features: &[f32], out: &mut [f32]) {
                 let ctrs: &[f64] = &[];
+                let cat_hashes: &[i32] = &[];
                 #(#raw_decls)*
                 #max_decl
                 #(#exp_decls)*
@@ -841,7 +883,7 @@ fn build_softmax_model(
     } else {
         quote! {
             pub fn predict_proba(&self, features: &[f32]) -> Vec<f32> {
-                self.predict_proba_internal(features, &[])
+                self.predict_proba_internal(features, &[], &[])
             }
 
             #predict_cat_proba_method
@@ -856,7 +898,7 @@ fn build_softmax_model(
                 }
             }
 
-            fn predict_proba_internal(&self, features: &[f32], ctrs: &[f64]) -> Vec<f32> {
+            fn predict_proba_internal(&self, features: &[f32], ctrs: &[f64], cat_hashes: &[i32]) -> Vec<f32> {
                 #(#raw_decls)*
                 #max_decl
                 #(#exp_decls)*

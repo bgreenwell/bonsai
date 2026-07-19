@@ -151,8 +151,8 @@ fn condition(split: &SplitKind, missing_direction: MissingDirection, val: f32) -
                 _ => !val.is_nan() && !membership,
             })
         }
-        SplitKind::OnlineCtr { .. } => {
-            bail!("interpreter does not support CatBoost CTR splits")
+        SplitKind::OnlineCtr { .. } | SplitKind::OneHotCat { .. } => {
+            bail!("interpreter does not support CatBoost categorical splits")
         }
     }
 }
