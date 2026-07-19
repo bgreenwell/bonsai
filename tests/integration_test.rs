@@ -569,6 +569,13 @@ fn test_catboost_regression_categorical() {
 
 #[test]
 #[ignore]
+fn test_catboost_regression_onehot() {
+    // one_hot_max_size above the cardinality: OneHotFeature splits, no CTRs.
+    run_catboost_cat_test_case("catboost/regression_onehot");
+}
+
+#[test]
+#[ignore]
 fn test_catboost_classification_multiclass() {
     run_multiclass_test_case("catboost/multiclass");
 }

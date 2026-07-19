@@ -178,7 +178,9 @@ fn analyze_tree(
 
             let (numeric, categorical) = match split {
                 SplitKind::Numeric { .. } => (1, 0),
-                SplitKind::Categorical { .. } | SplitKind::OnlineCtr { .. } => (0, 1),
+                SplitKind::Categorical { .. }
+                | SplitKind::OnlineCtr { .. }
+                | SplitKind::OneHotCat { .. } => (0, 1),
             };
 
             // Merge missing direction counts
@@ -430,6 +432,12 @@ fn print_node(node: &Node, depth: usize) {
                 }
                 SplitKind::OnlineCtr { ctr_idx, threshold } => {
                     format!("ctr[{}] > {:.6}", ctr_idx, threshold)
+                }
+                SplitKind::OneHotCat {
+                    cat_feature_index,
+                    value,
+                } => {
+                    format!("hash(cat[{}]) == {}", cat_feature_index, value)
                 }
             };
 

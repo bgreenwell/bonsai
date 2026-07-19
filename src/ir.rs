@@ -38,6 +38,12 @@ pub enum SplitKind {
     /// CatBoost-specific categorical split via Online CTR (Counter).
     /// The actual split logic is handled by the backend using embedded CTR tables.
     OnlineCtr { ctr_idx: usize, threshold: f32 },
+    /// CatBoost one-hot categorical split: TRUE when the category's 32-bit
+    /// CityHash (CalcCatFeatureHash) equals `value`.
+    OneHotCat {
+        cat_feature_index: usize,
+        value: i32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +210,16 @@ fn split_kind_eq(a: &SplitKind, b: &SplitKind) -> bool {
                 threshold: t2,
             },
         ) => i1 == i2 && t1 == t2,
+        (
+            SplitKind::OneHotCat {
+                cat_feature_index: c1,
+                value: v1,
+            },
+            SplitKind::OneHotCat {
+                cat_feature_index: c2,
+                value: v2,
+            },
+        ) => c1 == c2 && v1 == v2,
         _ => false,
     }
 }
